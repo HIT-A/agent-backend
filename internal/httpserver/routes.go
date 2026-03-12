@@ -1,6 +1,11 @@
 package httpserver
 
-import "net/http"
+import (
+	"encoding/json"
+	"net/http"
+
+	"hoa-agent-backend/internal/skills"
+)
 
 func NewRouter() http.Handler {
 	mux := http.NewServeMux()
@@ -26,5 +31,22 @@ func RegisterRoutes(mux *http.ServeMux) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
+	})
+
+	mux.HandleFunc("/v1/skills", func(w http.ResponseWriter, r *http.Request) {
+		// Only GET is allowed for /v1/skills.
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		reg := skills.NewRegistry()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(struct {
+			Skills []skills.Skill `json:"skills"`
+		}{Skills: reg.List()})
 	})
 }

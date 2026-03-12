@@ -61,3 +61,63 @@ func TestHealthRoute_NonGET_Returns405AndAllow(t *testing.T) {
 		t.Fatalf("expected Allow header %q, got %q", "GET, HEAD", allow)
 	}
 }
+
+func TestSkillsRoute_GET(t *testing.T) {
+	r := NewRouter()
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/skills", nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+	res := w.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", res.StatusCode)
+	}
+
+	if ct := res.Header.Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	}
+
+	b, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	var got struct {
+		Skills []struct {
+			Name string `json:"name"`
+		} `json:"skills"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal body: %v (body=%q)", err, string(b))
+	}
+
+	if len(got.Skills) < 1 {
+		t.Fatalf("expected at least 1 skill, got %d", len(got.Skills))
+	}
+
+	if got.Skills[0].Name != "placeholder" {
+		t.Fatalf("expected first skill name %q, got %q", "placeholder", got.Skills[0].Name)
+	}
+}
+
+func TestSkillsRoute_NonGET_Returns405AndAllow(t *testing.T) {
+	r := NewRouter()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/skills", nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+	res := w.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected status 405, got %d", res.StatusCode)
+	}
+
+	if allow := res.Header.Get("Allow"); allow != "GET" {
+		t.Fatalf("expected Allow header %q, got %q", "GET", allow)
+	}
+}
