@@ -9,8 +9,8 @@ type Server struct {
 	handler http.Handler
 }
 
-func New(addr string) *Server {
-	return &Server{addr: addr, handler: NewRouter(Options{})}
+func New(addr string, opts Options) *Server {
+	return &Server{addr: addr, handler: NewRouter(opts)}
 }
 
 func (s *Server) ListenAndServe() error {
