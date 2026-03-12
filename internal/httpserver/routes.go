@@ -1,20 +1,29 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
+	"hoa-agent-backend/internal/jobs"
 	"hoa-agent-backend/internal/skills"
 )
 
-func NewRouter() http.Handler {
+type Options struct {
+	Jobs interface {
+		Get(ctx context.Context, id string) (*jobs.Job, error)
+	}
+}
+
+func NewRouter(opts Options) http.Handler {
 	mux := http.NewServeMux()
-	RegisterRoutes(mux)
+	RegisterRoutes(mux, opts)
 	return mux
 }
 
-func RegisterRoutes(mux *http.ServeMux) {
+func RegisterRoutes(mux *http.ServeMux, opts Options) {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		// Only GET/HEAD are allowed for /health.
 		switch r.Method {
@@ -49,6 +58,43 @@ func RegisterRoutes(mux *http.ServeMux) {
 		_ = json.NewEncoder(w).Encode(struct {
 			Skills []skills.Skill `json:"skills"`
 		}{Skills: reg.List()})
+	})
+
+	mux.HandleFunc("/v1/jobs/", func(w http.ResponseWriter, r *http.Request) {
+		// Expected: /v1/jobs/{job_id}
+		id := strings.TrimPrefix(r.URL.Path, "/v1/jobs/")
+		if id == "" || strings.Contains(id, "/") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		if opts.Jobs == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		job, err := opts.Jobs.Get(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, jobs.ErrNotFound) {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(struct {
+			Ok  bool      `json:"ok"`
+			Job *jobs.Job `json:"job"`
+		}{Ok: true, Job: job})
 	})
 
 	mux.HandleFunc("/v1/skills/", func(w http.ResponseWriter, r *http.Request) {

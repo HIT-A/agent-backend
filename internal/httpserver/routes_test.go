@@ -10,7 +10,7 @@ import (
 )
 
 func TestHealthRoute_GET(t *testing.T) {
-	r := NewRouter()
+	r := NewRouter(Options{})
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -44,7 +44,7 @@ func TestHealthRoute_GET(t *testing.T) {
 }
 
 func TestHealthRoute_NonGET_Returns405AndAllow(t *testing.T) {
-	r := NewRouter()
+	r := NewRouter(Options{})
 
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)
 	w := httptest.NewRecorder()
@@ -63,7 +63,7 @@ func TestHealthRoute_NonGET_Returns405AndAllow(t *testing.T) {
 }
 
 func TestSkillsRoute_GET(t *testing.T) {
-	r := NewRouter()
+	r := NewRouter(Options{})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/skills", nil)
 	w := httptest.NewRecorder()
@@ -104,7 +104,7 @@ func TestSkillsRoute_GET(t *testing.T) {
 }
 
 func TestSkillsRoute_NonGET_Returns405AndAllow(t *testing.T) {
-	r := NewRouter()
+	r := NewRouter(Options{})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/skills", nil)
 	w := httptest.NewRecorder()

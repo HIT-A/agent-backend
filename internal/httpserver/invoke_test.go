@@ -11,7 +11,7 @@ import (
 )
 
 func TestInvokeSkill_Unknown_Returns404(t *testing.T) {
-	r := NewRouter()
+	r := NewRouter(Options{})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/skills/does-not-exist:invoke", strings.NewReader(`{"input": {"message": "hi"}}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -27,7 +27,7 @@ func TestInvokeSkill_Unknown_Returns404(t *testing.T) {
 }
 
 func TestInvokeSkill_Echo_ReturnsOkWithOutput(t *testing.T) {
-	r := NewRouter()
+	r := NewRouter(Options{})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/skills/echo:invoke", strings.NewReader(`{"input": {"message": "hi"}, "trace": {"id": "t1"}}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -74,7 +74,7 @@ func TestInvokeSkill_Echo_ReturnsOkWithOutput(t *testing.T) {
 }
 
 func TestInvokeSkill_NonPOST_Returns405AndAllow(t *testing.T) {
-	r := NewRouter()
+	r := NewRouter(Options{})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/skills/echo:invoke", nil)
 	w := httptest.NewRecorder()
