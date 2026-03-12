@@ -98,8 +98,8 @@ func TestSkillsRoute_GET(t *testing.T) {
 		t.Fatalf("expected at least 1 skill, got %d", len(got.Skills))
 	}
 
-	if got.Skills[0].Name != "placeholder" {
-		t.Fatalf("expected first skill name %q, got %q", "placeholder", got.Skills[0].Name)
+	if got.Skills[0].Name != "echo" {
+		t.Fatalf("expected first skill name %q, got %q", "echo", got.Skills[0].Name)
 	}
 }
 
