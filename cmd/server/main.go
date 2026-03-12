@@ -31,7 +31,11 @@ func main() {
 	}
 	defer func() { _ = db.Close() }()
 
-	if err := jobs.Migrate(ctx, db); err != nil {
+	// Ensure we always use a single connection for SQLite.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	if err := db.PingContext(ctx); err != nil {
 		log.Fatal(err)
 	}
 

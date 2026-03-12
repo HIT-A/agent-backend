@@ -86,3 +86,22 @@ func TestGetJob_Unknown_Returns404(t *testing.T) {
 		t.Fatalf("expected status 404, got %d", res.StatusCode)
 	}
 }
+
+func TestJobsRoute_NoTrailingSlash_DoesNotRedirect(t *testing.T) {
+	r := NewRouter(Options{Jobs: &fakeJobStore{}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+	res := w.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", res.StatusCode)
+	}
+
+	if loc := res.Header.Get("Location"); loc != "" {
+		t.Fatalf("expected no redirect Location header, got %q", loc)
+	}
+}

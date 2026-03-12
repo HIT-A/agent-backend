@@ -5,23 +5,34 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
 
-func TestSQLiteStore_CreateGetUpdate(t *testing.T) {
-	ctx := context.Background()
+func openTestDB(t *testing.T) *sql.DB {
+	t.Helper()
 
-	db, err := sql.Open("sqlite", "file:memdb1?mode=memory&cache=shared")
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", uuid.NewString())
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+
 	// Ensure we always use the same connection for in-memory.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
+	return db
+}
+
+func TestSQLiteStore_CreateGetUpdate(t *testing.T) {
+	ctx := context.Background()
+
+	db := openTestDB(t)
 	store := NewSQLiteStore(db)
 
 	in := json.RawMessage(`{"message":"hi"}`)
@@ -71,17 +82,10 @@ func TestSQLiteStore_CreateGetUpdate(t *testing.T) {
 func TestSQLiteStore_Get_UnknownReturnsNotFound(t *testing.T) {
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite", "file:memdb1?mode=memory&cache=shared")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-
+	db := openTestDB(t)
 	store := NewSQLiteStore(db)
 
-	_, err = store.Get(ctx, "does-not-exist")
+	_, err := store.Get(ctx, "does-not-exist")
 	if err == nil {
 		t.Fatalf("expected error")
 	}

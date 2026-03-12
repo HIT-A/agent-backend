@@ -14,23 +14,60 @@ import (
 type SQLiteStore struct {
 	db *sql.DB
 
-	migrateOnce sync.Once
+	migrateMu   sync.Mutex
+	migrateCond *sync.Cond
+	migrating   bool
+	migrated    bool
 	migrateErr  error
 }
 
 func NewSQLiteStore(db *sql.DB) *SQLiteStore {
-	return &SQLiteStore{db: db}
+	if db == nil {
+		panic("jobs: nil *sql.DB")
+	}
+	s := &SQLiteStore{db: db}
+	s.migrateCond = sync.NewCond(&s.migrateMu)
+	return s
 }
 
-func (s *SQLiteStore) ensureMigrated(ctx context.Context) error {
-	s.migrateOnce.Do(func() {
-		s.migrateErr = Migrate(ctx, s.db)
-	})
-	return s.migrateErr
+func (s *SQLiteStore) ensureMigrated() error {
+	s.migrateMu.Lock()
+	if s.migrated {
+		s.migrateMu.Unlock()
+		return nil
+	}
+	if s.migrating {
+		for s.migrating {
+			s.migrateCond.Wait()
+		}
+		if s.migrated {
+			s.migrateMu.Unlock()
+			return nil
+		}
+		err := s.migrateErr
+		s.migrateMu.Unlock()
+		return err
+	}
+
+	s.migrating = true
+	s.migrateMu.Unlock()
+
+	err := Migrate(context.Background(), s.db)
+
+	s.migrateMu.Lock()
+	s.migrating = false
+	s.migrateErr = err
+	if err == nil {
+		s.migrated = true
+	}
+	s.migrateCond.Broadcast()
+	s.migrateMu.Unlock()
+
+	return err
 }
 
 func (s *SQLiteStore) Create(ctx context.Context, skillName string, input json.RawMessage) (*Job, error) {
-	if err := s.ensureMigrated(ctx); err != nil {
+	if err := s.ensureMigrated(); err != nil {
 		return nil, err
 	}
 
@@ -58,7 +95,7 @@ VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)
 }
 
 func (s *SQLiteStore) Get(ctx context.Context, id string) (*Job, error) {
-	if err := s.ensureMigrated(ctx); err != nil {
+	if err := s.ensureMigrated(); err != nil {
 		return nil, err
 	}
 
@@ -112,7 +149,7 @@ WHERE id = ?
 }
 
 func (s *SQLiteStore) UpdateStatus(ctx context.Context, id string, status Status, output json.RawMessage, errMsg string) (*Job, error) {
-	if err := s.ensureMigrated(ctx); err != nil {
+	if err := s.ensureMigrated(); err != nil {
 		return nil, err
 	}
 

@@ -60,6 +60,20 @@ func RegisterRoutes(mux *http.ServeMux, opts Options) {
 		}{Skills: reg.List()})
 	})
 
+	// ServeMux will redirect "/v1/jobs" to "/v1/jobs/" for GET/HEAD.
+	// Explicitly handle it to avoid implicit redirects.
+	mux.HandleFunc("/v1/jobs", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+			w.WriteHeader(http.StatusNotFound)
+			return
+		default:
+			w.Header().Set("Allow", http.MethodGet)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+	})
+
 	mux.HandleFunc("/v1/jobs/", func(w http.ResponseWriter, r *http.Request) {
 		// Expected: /v1/jobs/{job_id}
 		id := strings.TrimPrefix(r.URL.Path, "/v1/jobs/")
@@ -109,7 +123,7 @@ func RegisterRoutes(mux *http.ServeMux, opts Options) {
 		}
 
 		name := strings.TrimSuffix(path, suffix)
-		if name == "" {
+		if name == "" || strings.Contains(name, "/") {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}

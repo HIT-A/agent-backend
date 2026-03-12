@@ -10,6 +10,22 @@ import (
 	"testing"
 )
 
+func TestInvokeSkill_PathWithSlash_Returns404(t *testing.T) {
+	r := NewRouter(Options{})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/skills/no/slashes:invoke", strings.NewReader(`{"input": {"message": "hi"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+	res := w.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", res.StatusCode)
+	}
+}
+
 func TestInvokeSkill_Unknown_Returns404(t *testing.T) {
 	r := NewRouter(Options{})
 
