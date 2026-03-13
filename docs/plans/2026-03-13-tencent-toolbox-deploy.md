@@ -62,15 +62,31 @@ go test ./...
 
 ### 3.1 Check if collection exists
 
+If Qdrant auth is **disabled**:
 ```bash
 curl -sS "http://127.0.0.1:6333/collections/hita_knowledge" | jq
 ```
 
+If Qdrant auth is **enabled** (you will see HTTP 401 without a key):
+```bash
+curl -sS "http://127.0.0.1:6333/collections/hita_knowledge" \
+  -H "api-key: $QDRANT_API_KEY" | jq
+```
+
 ### 3.2 Create collection (vector size = 3)
 
+If Qdrant auth is **disabled**:
 ```bash
 curl -sS -X PUT "http://127.0.0.1:6333/collections/hita_knowledge" \
   -H "Content-Type: application/json" \
+  -d '{"vectors":{"size":3,"distance":"Cosine"}}' | jq
+```
+
+If Qdrant auth is **enabled**:
+```bash
+curl -sS -X PUT "http://127.0.0.1:6333/collections/hita_knowledge" \
+  -H "Content-Type: application/json" \
+  -H "api-key: $QDRANT_API_KEY" \
   -d '{"vectors":{"size":3,"distance":"Cosine"}}' | jq
 ```
 
