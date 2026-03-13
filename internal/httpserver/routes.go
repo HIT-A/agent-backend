@@ -155,17 +155,55 @@ func RegisterRoutes(mux *http.ServeMux, opts Options) {
 			return
 		}
 
-		output, err := skill.Invoke(r.Context(), req.Input, req.Trace)
+		if !skill.IsAsync {
+			output, err := skill.Invoke(r.Context(), req.Input, req.Trace)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(struct {
+				Ok     bool           `json:"ok"`
+				Output map[string]any `json:"output"`
+			}{Ok: true, Output: output})
+			return
+		}
+
+		if opts.Jobs == nil || opts.Queue == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		payload, err := json.Marshal(struct {
+			Input map[string]any `json:"input"`
+			Trace map[string]any `json:"trace"`
+		}{Input: req.Input, Trace: req.Trace})
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		job, err := opts.Jobs.Create(r.Context(), skill.Name, json.RawMessage(payload))
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		select {
+		case opts.Queue <- job.ID:
+			// queued
+		case <-r.Context().Done():
+			w.WriteHeader(http.StatusRequestTimeout)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(struct {
-			Ok     bool           `json:"ok"`
-			Output map[string]any `json:"output"`
-		}{Ok: true, Output: output})
+			Ok    bool   `json:"ok"`
+			JobID string `json:"job_id"`
+		}{Ok: true, JobID: job.ID})
 	})
 }
