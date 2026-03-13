@@ -141,26 +141,49 @@ func RegisterRoutes(mux *http.ServeMux, opts Options) {
 			return
 		}
 
+		type invokeError struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Retryable bool   `json:"retryable"`
+		}
+		type invokeErrorEnvelope struct {
+			Ok    bool        `json:"ok"`
+			Error invokeError `json:"error"`
+		}
+
+		writeErr := func(code string, msg string, retryable bool) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(invokeErrorEnvelope{
+				Ok: false,
+				Error: invokeError{
+					Code:      code,
+					Message:   msg,
+					Retryable: retryable,
+				},
+			})
+		}
+
 		var req struct {
 			Input map[string]any `json:"input"`
 			Trace map[string]any `json:"trace"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
+			writeErr("INVALID_JSON", "invalid JSON: "+err.Error(), false)
 			return
 		}
 
 		reg := skills.NewRegistry()
 		skill, ok := reg.Get(name)
 		if !ok {
-			w.WriteHeader(http.StatusNotFound)
+			writeErr("SKILL_NOT_FOUND", "skill not found: "+name, false)
 			return
 		}
 
 		if !skill.IsAsync {
 			output, err := skill.Invoke(r.Context(), req.Input, req.Trace)
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
+				writeErr("INTERNAL", "invoke failed: "+err.Error(), true)
 				return
 			}
 
@@ -174,7 +197,7 @@ func RegisterRoutes(mux *http.ServeMux, opts Options) {
 		}
 
 		if opts.Jobs == nil || opts.Queue == nil {
-			w.WriteHeader(http.StatusInternalServerError)
+			writeErr("INTERNAL", "async jobs not configured", false)
 			return
 		}
 
@@ -183,13 +206,13 @@ func RegisterRoutes(mux *http.ServeMux, opts Options) {
 			Trace map[string]any `json:"trace"`
 		}{Input: req.Input, Trace: req.Trace})
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
+			writeErr("INTERNAL", "failed to encode request", false)
 			return
 		}
 
 		job, err := opts.Jobs.Create(r.Context(), skill.Name, json.RawMessage(payload))
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
+			writeErr("INTERNAL", "failed to create job: "+err.Error(), true)
 			return
 		}
 
@@ -204,7 +227,7 @@ func RegisterRoutes(mux *http.ServeMux, opts Options) {
 			stCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			_, _ = opts.Jobs.UpdateStatus(stCtx, job.ID, jobs.StatusFailed, nil, "enqueue timeout")
 			cancel()
-			w.WriteHeader(http.StatusServiceUnavailable)
+			writeErr("INTERNAL", "enqueue timeout", true)
 			return
 		}
 
