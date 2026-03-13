@@ -40,7 +40,8 @@ func main() {
 	}
 
 	store := jobs.NewSQLiteStore(db)
+	queue := make(chan string, 128)
 
-	s := httpserver.New(":8080", httpserver.Options{Jobs: store})
+	s := httpserver.New(":8080", httpserver.Options{Jobs: store, Queue: queue})
 	log.Fatal(s.ListenAndServe())
 }

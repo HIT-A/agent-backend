@@ -11,10 +11,15 @@ import (
 	"hoa-agent-backend/internal/skills"
 )
 
+type JobStore interface {
+	Create(ctx context.Context, skillName string, input json.RawMessage) (*jobs.Job, error)
+	Get(ctx context.Context, id string) (*jobs.Job, error)
+	UpdateStatus(ctx context.Context, id string, status jobs.Status, output json.RawMessage, errMsg string) (*jobs.Job, error)
+}
+
 type Options struct {
-	Jobs interface {
-		Get(ctx context.Context, id string) (*jobs.Job, error)
-	}
+	Jobs  JobStore
+	Queue chan<- string
 }
 
 func NewRouter(opts Options) http.Handler {

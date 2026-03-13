@@ -16,6 +16,22 @@ type fakeJobStore struct {
 	err error
 }
 
+func (s *fakeJobStore) Create(ctx context.Context, skillName string, input json.RawMessage) (*jobs.Job, error) {
+	_ = ctx
+	_ = skillName
+	_ = input
+	panic("not implemented")
+}
+
+func (s *fakeJobStore) UpdateStatus(ctx context.Context, id string, status jobs.Status, output json.RawMessage, errMsg string) (*jobs.Job, error) {
+	_ = ctx
+	_ = id
+	_ = status
+	_ = output
+	_ = errMsg
+	panic("not implemented")
+}
+
 func (s *fakeJobStore) Get(ctx context.Context, id string) (*jobs.Job, error) {
 	if s.err != nil {
 		return nil, s.err

@@ -10,6 +10,7 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{}
 	r.Register(NewEchoSkill())
+	r.Register(NewSleepEchoSkill())
 	return r
 }
 
@@ -29,7 +30,7 @@ func (r *Registry) List() []Skill {
 	// safely compare and/or serialize the list.
 	out := make([]Skill, len(r.skills))
 	for i := range r.skills {
-		out[i] = Skill{Name: r.skills[i].Name}
+		out[i] = Skill{Name: r.skills[i].Name, IsAsync: r.skills[i].IsAsync}
 	}
 	return out
 }
