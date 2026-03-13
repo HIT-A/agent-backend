@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"hoa-agent-backend/internal/jobs"
 	"hoa-agent-backend/internal/skills"
@@ -14,6 +15,7 @@ import (
 type JobStore interface {
 	Create(ctx context.Context, skillName string, input json.RawMessage) (*jobs.Job, error)
 	Get(ctx context.Context, id string) (*jobs.Job, error)
+	ClaimRunning(ctx context.Context, id string) (*jobs.Job, error)
 	UpdateStatus(ctx context.Context, id string, status jobs.Status, output json.RawMessage, errMsg string) (*jobs.Job, error)
 }
 
@@ -191,11 +193,18 @@ func RegisterRoutes(mux *http.ServeMux, opts Options) {
 			return
 		}
 
+		enqCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+
 		select {
 		case opts.Queue <- job.ID:
 			// queued
-		case <-r.Context().Done():
-			w.WriteHeader(http.StatusRequestTimeout)
+		case <-enqCtx.Done():
+			// Backpressure: couldn't enqueue in time. Mark as failed.
+			stCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_, _ = opts.Jobs.UpdateStatus(stCtx, job.ID, jobs.StatusFailed, nil, "enqueue timeout")
+			cancel()
+			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 

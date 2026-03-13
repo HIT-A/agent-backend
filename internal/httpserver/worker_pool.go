@@ -3,7 +3,9 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 
 	"hoa-agent-backend/internal/jobs"
 	"hoa-agent-backend/internal/skills"
@@ -35,46 +37,72 @@ func StartWorkerPool(ctx context.Context, n int, queue <-chan string, store JobS
 						return
 					}
 
-					job, err := store.Get(ctx, id)
+					job, err := store.ClaimRunning(ctx, id)
 					if err != nil {
+						// Another worker likely claimed it first.
+						if errors.Is(err, jobs.ErrNotClaimable) {
+							continue
+						}
 						continue
 					}
-					if job.Status != jobs.StatusQueued {
-						continue
-					}
-
-					_, _ = store.UpdateStatus(ctx, id, jobs.StatusRunning, nil, "")
 
 					var payload struct {
 						Input map[string]any `json:"input"`
 						Trace map[string]any `json:"trace"`
 					}
 					if err := json.Unmarshal(job.InputJSON, &payload); err != nil {
-						_, _ = store.UpdateStatus(ctx, id, jobs.StatusFailed, nil, fmt.Sprintf("invalid input_json: %v", err))
+						updateFinalStatus(id, store, jobs.StatusFailed, nil, fmt.Sprintf("invalid input_json: %v", err))
 						continue
 					}
 
 					skill, ok := reg.Get(job.SkillName)
 					if !ok {
-						_, _ = store.UpdateStatus(ctx, id, jobs.StatusFailed, nil, fmt.Sprintf("unknown skill: %s", job.SkillName))
+						updateFinalStatus(id, store, jobs.StatusFailed, nil, fmt.Sprintf("unknown skill: %s", job.SkillName))
 						continue
 					}
 
-					out, err := skill.Invoke(ctx, payload.Input, payload.Trace)
-					if err != nil {
-						_, _ = store.UpdateStatus(ctx, id, jobs.StatusFailed, nil, err.Error())
+					var (
+						out      map[string]any
+						invokeOK bool
+					)
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								updateFinalStatus(id, store, jobs.StatusFailed, nil, fmt.Sprintf("panic: %v", r))
+								invokeOK = false
+							}
+						}()
+
+						result, err := skill.Invoke(ctx, payload.Input, payload.Trace)
+						if err != nil {
+							updateFinalStatus(id, store, jobs.StatusFailed, nil, err.Error())
+							invokeOK = false
+							return
+						}
+						out = result
+						invokeOK = true
+					}()
+
+					if !invokeOK {
+						// status was already updated in error/panic path
 						continue
 					}
 
 					outB, err := json.Marshal(out)
 					if err != nil {
-						_, _ = store.UpdateStatus(ctx, id, jobs.StatusFailed, nil, fmt.Sprintf("marshal output: %v", err))
+						updateFinalStatus(id, store, jobs.StatusFailed, nil, fmt.Sprintf("marshal output: %v", err))
 						continue
 					}
 
-					_, _ = store.UpdateStatus(ctx, id, jobs.StatusSucceeded, json.RawMessage(outB), "")
+					updateFinalStatus(id, store, jobs.StatusSucceeded, json.RawMessage(outB), "")
 				}
 			}
 		}()
 	}
+}
+
+func updateFinalStatus(id string, store JobStore, status jobs.Status, output json.RawMessage, errMsg string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _ = store.UpdateStatus(ctx, id, status, output, errMsg)
 }

@@ -17,6 +17,10 @@ const (
 
 var ErrNotFound = errors.New("job not found")
 
+// ErrNotClaimable indicates the job exists but is not in a claimable state.
+// For now, only queued jobs can be claimed for execution.
+var ErrNotClaimable = errors.New("job not claimable")
+
 type Job struct {
 	ID         string          `json:"id"`
 	Status     Status          `json:"status"`

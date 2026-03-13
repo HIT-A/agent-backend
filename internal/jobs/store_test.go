@@ -79,6 +79,34 @@ func TestSQLiteStore_CreateGetUpdate(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_ClaimRunning_OnlyClaimsQueuedOnce(t *testing.T) {
+	ctx := context.Background()
+
+	db := openTestDB(t)
+	store := NewSQLiteStore(db)
+
+	job, err := store.Create(ctx, "echo", json.RawMessage(`{"message":"hi"}`))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	claimed, err := store.ClaimRunning(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if claimed.Status != StatusRunning {
+		t.Fatalf("expected status %q, got %q", StatusRunning, claimed.Status)
+	}
+
+	_, err = store.ClaimRunning(ctx, job.ID)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !errors.Is(err, ErrNotClaimable) {
+		t.Fatalf("expected ErrNotClaimable, got %v", err)
+	}
+}
+
 func TestSQLiteStore_Get_UnknownReturnsNotFound(t *testing.T) {
 	ctx := context.Background()
 

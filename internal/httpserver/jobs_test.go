@@ -23,6 +23,12 @@ func (s *fakeJobStore) Create(ctx context.Context, skillName string, input json.
 	panic("not implemented")
 }
 
+func (s *fakeJobStore) ClaimRunning(ctx context.Context, id string) (*jobs.Job, error) {
+	_ = ctx
+	_ = id
+	panic("not implemented")
+}
+
 func (s *fakeJobStore) UpdateStatus(ctx context.Context, id string, status jobs.Status, output json.RawMessage, errMsg string) (*jobs.Job, error) {
 	_ = ctx
 	_ = id

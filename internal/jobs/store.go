@@ -148,6 +148,41 @@ WHERE id = ?
 	return job, nil
 }
 
+func (s *SQLiteStore) ClaimRunning(ctx context.Context, id string) (*Job, error) {
+	if err := s.ensureMigrated(); err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	res, err := s.db.ExecContext(ctx, `
+UPDATE jobs
+SET status = ?, updated_at = ?
+WHERE id = ? AND status = ?
+`, string(StatusRunning), now, id, string(StatusQueued))
+	if err != nil {
+		return nil, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 {
+		// Distinguish "not found" vs "wrong status" without racing a re-claim.
+		var one int
+		err := s.db.QueryRowContext(ctx, `SELECT 1 FROM jobs WHERE id = ?`, id).Scan(&one)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, ErrNotFound
+			}
+			return nil, err
+		}
+		return nil, ErrNotClaimable
+	}
+
+	return s.Get(ctx, id)
+}
+
 func (s *SQLiteStore) UpdateStatus(ctx context.Context, id string, status Status, output json.RawMessage, errMsg string) (*Job, error) {
 	if err := s.ensureMigrated(); err != nil {
 		return nil, err

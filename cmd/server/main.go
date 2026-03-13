@@ -4,8 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strconv"
+	"syscall"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -14,7 +19,8 @@ import (
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
@@ -42,6 +48,35 @@ func main() {
 	store := jobs.NewSQLiteStore(db)
 	queue := make(chan string, 128)
 
-	s := httpserver.New(":8080", httpserver.Options{Jobs: store, Queue: queue})
-	log.Fatal(s.ListenAndServe())
+	workerCount := 4
+	if v := os.Getenv("WORKER_COUNT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			log.Fatalf("invalid WORKER_COUNT %q: %v", v, err)
+		}
+		workerCount = n
+	}
+
+	httpserver.StartWorkerPool(ctx, workerCount, queue, store)
+
+	router := httpserver.NewRouter(httpserver.Options{Jobs: store, Queue: queue})
+	srv := &http.Server{Addr: ":8080", Handler: router}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ListenAndServe()
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+		return
+	case err := <-errCh:
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+		return
+	}
 }

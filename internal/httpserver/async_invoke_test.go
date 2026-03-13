@@ -109,10 +109,16 @@ func TestInvokeSkill_Async_JobEventuallySucceedsWithOutput(t *testing.T) {
 		t.Fatalf("expected non-empty job_id")
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	timeout := time.NewTimer(2 * time.Second)
+	defer timeout.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
-		if time.Now().After(deadline) {
+		select {
+		case <-timeout.C:
 			t.Fatalf("timed out waiting for job to succeed")
+		case <-ticker.C:
 		}
 
 		jobReq := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+invokeRes.JobID, nil)
@@ -156,8 +162,6 @@ func TestInvokeSkill_Async_JobEventuallySucceedsWithOutput(t *testing.T) {
 		if got.Job.Status == jobs.StatusFailed {
 			t.Fatalf("job failed: %s", got.Job.Error)
 		}
-
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 
