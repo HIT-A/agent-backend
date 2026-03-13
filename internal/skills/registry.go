@@ -11,6 +11,7 @@ func NewRegistry() *Registry {
 	r := &Registry{}
 	r.Register(NewEchoSkill())
 	r.Register(NewSleepEchoSkill())
+	r.Register(NewRAGQuerySkill())
 	return r
 }
 

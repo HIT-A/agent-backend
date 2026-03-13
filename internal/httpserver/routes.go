@@ -183,6 +183,11 @@ func RegisterRoutes(mux *http.ServeMux, opts Options) {
 		if !skill.IsAsync {
 			output, err := skill.Invoke(r.Context(), req.Input, req.Trace)
 			if err != nil {
+				var invErr *skills.InvokeError
+				if errors.As(err, &invErr) {
+					writeErr(invErr.Code, invErr.Message, invErr.Retryable)
+					return
+				}
 				writeErr("INTERNAL", "invoke failed: "+err.Error(), true)
 				return
 			}
