@@ -26,7 +26,7 @@ func TestInvokeSkill_PathWithSlash_Returns404(t *testing.T) {
 	}
 }
 
-func TestInvokeSkill_Unknown_Returns404(t *testing.T) {
+func TestInvokeSkill_Unknown_Returns200WithErrorEnvelope(t *testing.T) {
 	r := NewRouter(Options{})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/skills/does-not-exist:invoke", strings.NewReader(`{"input": {"message": "hi"}}`))
@@ -37,8 +37,84 @@ func TestInvokeSkill_Unknown_Returns404(t *testing.T) {
 	res := w.Result()
 	defer res.Body.Close()
 
-	if res.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected status 404, got %d", res.StatusCode)
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected status 200, got %d (body=%q)", res.StatusCode, string(b))
+	}
+
+	if ct := res.Header.Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	}
+
+	var got struct {
+		Ok    bool `json:"ok"`
+		Error struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Retryable bool   `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if got.Ok != false {
+		t.Fatalf("expected ok=false, got %v", got.Ok)
+	}
+	if got.Error.Code != "SKILL_NOT_FOUND" {
+		t.Fatalf("expected error.code=SKILL_NOT_FOUND, got %q", got.Error.Code)
+	}
+	if got.Error.Message == "" {
+		t.Fatalf("expected non-empty error.message")
+	}
+	if got.Error.Retryable != false {
+		t.Fatalf("expected error.retryable=false, got %v", got.Error.Retryable)
+	}
+}
+
+func TestInvokeSkill_InvalidJSON_Returns200WithErrorEnvelope(t *testing.T) {
+	r := NewRouter(Options{})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/skills/echo:invoke", strings.NewReader(`{"input":`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+	res := w.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected status 200, got %d (body=%q)", res.StatusCode, string(b))
+	}
+
+	if ct := res.Header.Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	}
+
+	var got struct {
+		Ok    bool `json:"ok"`
+		Error struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Retryable bool   `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if got.Ok != false {
+		t.Fatalf("expected ok=false, got %v", got.Ok)
+	}
+	if got.Error.Code != "INVALID_JSON" {
+		t.Fatalf("expected error.code=INVALID_JSON, got %q", got.Error.Code)
+	}
+	if got.Error.Message == "" {
+		t.Fatalf("expected non-empty error.message")
+	}
+	if got.Error.Retryable != false {
+		t.Fatalf("expected error.retryable=false, got %v", got.Error.Retryable)
 	}
 }
 
