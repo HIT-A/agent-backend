@@ -270,6 +270,11 @@ func getPRServerBaseURL() string {
 	return "http://localhost:8080"
 }
 
+// getPRServerToken returns the pr-server token from environment.
+func getPRServerToken() string {
+	return os.Getenv("PR_SERVER_TOKEN")
+}
+
 // translatePRServerError maps pr-server error codes to agent-backend error codes.
 func translatePRServerError(code string) string {
 	// Map pr-server error codes to agent-backend error codes

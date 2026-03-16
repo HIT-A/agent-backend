@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"strings"
 	"time"
 )
 
@@ -44,7 +42,7 @@ func NewCourseReadSkill() Skill {
 			}
 
 			// 调用 pr-server
-			prServerURL := getPRServerURL()
+			prServerURL := getPRServerBaseURL()
 			if prServerURL == "" {
 				return nil, &InvokeError{Code: "CONFIG", Message: "pr_server_url not configured", Retryable: false}
 			}
@@ -109,7 +107,7 @@ func NewCoursesSearchSkill() Skill {
 				in.Limit = 10
 			}
 
-			prServerURL := getPRServerURL()
+			prServerURL := getPRServerBaseURL()
 			if prServerURL == "" {
 				return nil, &InvokeError{Code: "CONFIG", Message: "pr_server_url not configured", Retryable: false}
 			}
@@ -194,15 +192,4 @@ func parseCourseSearchInput(input map[string]any) CourseSearchInput {
 	}
 
 	return in
-}
-
-func getPRServerURL() string {
-	if url := os.Getenv("PR_SERVER_URL"); url != "" {
-		return strings.TrimRight(url, "/")
-	}
-	return "http://localhost:8080"
-}
-
-func getPRServerToken() string {
-	return os.Getenv("PR_SERVER_TOKEN")
 }
