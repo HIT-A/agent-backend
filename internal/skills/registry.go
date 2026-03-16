@@ -114,6 +114,9 @@ func NewRegistry() *Registry {
 	// Register unified search skill
 	r.Register(NewUnifiedSearchSkill())
 
+	// Register aggregator summarize skill
+	r.Register(NewAggregatorSummarizeSkill())
+
 	// Register data ingest skills
 	r.Register(NewDataIngestSkill())
 	r.Register(NewBatchDataIngestSkill())
