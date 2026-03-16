@@ -141,3 +141,63 @@ func getString(m map[string]any, key string) string {
 	s, _ := v.(string)
 	return s
 }
+
+// QdrantPoint is the minimal payload for points upsert.
+type QdrantPoint struct {
+	ID      any            `json:"id"`
+	Vector  []float64      `json:"vector"`
+	Payload map[string]any `json:"payload,omitempty"`
+}
+
+func (c *QdrantClient) Upsert(ctx context.Context, collection string, points []QdrantPoint) error {
+	if c == nil {
+		return errors.New("nil qdrant client")
+	}
+	if c.HTTP == nil {
+		c.HTTP = http.DefaultClient
+	}
+	col := collection
+	if strings.TrimSpace(col) == "" {
+		col = c.Collection
+	}
+	if strings.TrimSpace(col) == "" {
+		return errors.New("qdrant collection is required")
+	}
+
+	endpoint := fmt.Sprintf("%s/collections/%s/points?wait=true", c.BaseURL, col)
+
+	body, err := json.Marshal(struct {
+		Points []QdrantPoint `json:"points"`
+	}{
+		Points: points,
+	})
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		req.Header.Set("api-key", c.APIKey)
+	}
+
+	ctx2, cancel := context.WithTimeout(req.Context(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 8<<10))
+		return fmt.Errorf("qdrant upsert failed: status=%d body=%q", res.StatusCode, string(b))
+	}
+
+	return nil
+}

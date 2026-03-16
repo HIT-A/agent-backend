@@ -1,0 +1,6 @@
+unstructured[pdf,docx,pptx]>=0.13.0
+PyMuPDF>=1.23.0
+python-docx>=1.1.0
+python-pptx>=0.6.23
+mcp>=1.0.0
+python-magic>=0.4.27

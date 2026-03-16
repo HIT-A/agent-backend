@@ -1,0 +1,27 @@
+{
+  "servers": [
+    {
+      "name": "playwright",
+      "transport": "http",
+      "url": "http://localhost:3000",
+      "enabled": true
+    },
+    {
+      "name": "filesystem",
+      "transport": "stdio",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/data"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "brave-search",
+      "transport": "http",
+      "url": "http://localhost:3001",
+      "enabled": false
+    }
+  ]
+}

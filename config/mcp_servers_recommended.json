@@ -1,0 +1,77 @@
+{
+  "servers": [
+    {
+      "name": "filesystem",
+      "transport": "stdio",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "./HITA_Project"
+      ],
+      "enabled": true,
+      "description": "Local file system access for HITA_Project directory"
+    },
+    {
+      "name": "github",
+      "transport": "stdio",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "enabled": true,
+      "description": "GitHub repository management (read files, create PRs)"
+    },
+    {
+      "name": "browser-use",
+      "transport": "http",
+      "url": "http://localhost:7777",
+      "enabled": false,
+      "description": "Browser automation using Playwright (for 教务系统 scraping)"
+    },
+    {
+      "name": "fetch",
+      "transport": "stdio",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-fetch"
+      ],
+      "enabled": true,
+      "description": "Web content to Markdown conversion (CSDN, 新闻, etc.)"
+    },
+    {
+      "name": "brave-search",
+      "transport": "stdio",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-brave-search"
+      ],
+      "enabled": false,
+      "description": "External web search using Brave API (requires BRAVE_API_KEY)",
+      "requires_env": ["BRAVE_API_KEY"]
+    },
+    {
+      "name": "qdrant-mcp",
+      "transport": "stdio",
+      "command": [
+        "npx",
+        "-y",
+        "@qdrant/mcp-server-qdrant"
+      ],
+      "enabled": false,
+      "description": "Qdrant vector database connection (alternative to rag.query)",
+      "note": "Disabled by default since we already have rag.query skill"
+    }
+  ],
+  "notes": {
+    "filesystem": "Set working directory to HITA_Project for local code access",
+    "github": "Requires GITHUB_TOKEN environment variable",
+    "browser-use": "Requires Docker: docker run -p 7777:7777 browser-use/browser-use:latest",
+    "fetch": "Converts HTML to Markdown, removes clutter",
+    "brave-search": "Get API key from https://api.search.brave.com/app/dashboard",
+    "qdrant-mcp": "Alternative to rag.query skill, useful for advanced queries"
+  }
+}

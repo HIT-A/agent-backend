@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  # Agent Backend (Main Service)
+  agent-backend:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      # MCP Servers Configuration
+      - MCP_SERVERS=${MCP_SERVERS}
+      # PR Server
+      - PR_SERVER_URL=${PR_SERVER_URL:-http://pr-server:8080}
+      # Qdrant
+      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
+      # GitHub Token (optional, for github-mcp)
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # Brave API Key (optional, for brave-search)
+      - BRAVE_API_KEY=${BRAVE_API_KEY:-}
+    depends_on:
+      - qdrant
+      - browser-use
+    volumes:
+      - ./HITA_Project:/data
+    restart: unless-stopped
+    networks:
+      - agent-network
+
+  # Qdrant (Vector Database)
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+    networks:
+      - agent-network
+
+  # Browser-use MCP (Browser Automation)
+  browser-use:
+    image: browser-use/browser-use:latest
+    ports:
+      - "7777:7777"
+    restart: unless-stopped
+    networks:
+      - agent-network
+
+volumes:
+  qdrant-data:
+    driver: local
+
+networks:
+  agent-network:
+    driver: bridge

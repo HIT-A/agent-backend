@@ -1,0 +1,136 @@
+# HIT-A RAG Data Collection Configuration
+
+repositories:
+  # 哈工大相关资源
+  hit:
+    - owner: hitlug
+      repo: hit-network-resource
+      description: "哈工大网络资源一览"
+    
+    - owner: hithesis
+      repo: hithesis
+      description: "哈尔滨工业大学LaTeX论文模板"
+    
+    - owner: rccoder
+      repo: HIT-Computer-Network
+      description: "哈工大计算机网络实验"
+    
+    - owner: HITSZ-OpenCS
+      repo: HITSZ-OpenCS
+      description: "哈工大（深圳）计算机专业课程攻略"
+    
+    - owner: HITLittleZheng
+      repo: HITCS
+      description: "哈工大计算机专业课程资料"
+    
+    - owner: LiYing0
+      repo: CS_Gra-HITsz
+      description: "CS_Gra-HITsz研究生课程"
+    
+    - owner: hoverwinter
+      repo: HIT-OSLab
+      description: "HIT-OSLab操作系统课"
+    
+    - owner: sherlockqwq
+      repo: HITWH_learningResource_share
+      description: "哈工大（威海）学习资源"
+    
+    - owner: gzn00417
+      repo: HIT-CS-Labs
+      description: "哈工大计算学部实验室介绍"
+    
+    - owner: DWaveletT
+      repo: HIT-COA-Lab
+      description: "哈工大计算机体系结构实验"
+    
+    - owner: hitszosa
+      repo: universal-hit-thesis
+      description: "哈尔滨工业大学论文模板"
+    
+    - owner: gcentqs
+      repo: hit-854
+      description: "哈工大计算机854考研资料"
+    
+    - owner: szxSpark
+      repo: hit-master-course-note
+      description: "哈工大计算机研究生课程笔记"
+    
+    - owner: Mor-Li
+      repo: HITSZ-OpenDS
+      description: "哈工大（深圳）大数据专业课程"
+    
+    - owner: guoJohnny
+      repo: "-837-"
+      description: "哈工大网络与空间安全837资料库"
+    
+    - owner: hitcslj
+      repo: HIT-CS-Master
+      description: "哈工大（本部）计算机研究生攻略"
+  
+  # 其他高校优质资源
+  other_universities:
+    - owner: PKUanonym
+      repo: REKCARC-TSC-UHT
+      description: "清华大学计算机系课程攻略"
+    
+    - owner: QSCTech
+      repo: zju-icicles
+      description: "浙江大学课程攻略"
+
+file_types:
+  documents:
+    - ".pdf"
+    - ".docx"
+    - ".doc"
+    - ".pptx"
+    - ".ppt"
+    - ".txt"
+    - ".md"
+    - ".rtf"
+  
+  code:
+    - ".py"
+    - ".java"
+    - ".cpp"
+    - ".c"
+    - ".h"
+  
+  data:
+    - ".json"
+    - ".yaml"
+    - ".yml"
+    - ".csv"
+
+conversion:
+  pdf:
+    library: "pymupdf"
+    extract_images: false
+    preserve_layout: true
+  
+  docx:
+    library: "python-docx"
+    doc_to_docx: true
+  
+  pptx:
+    library: "python-pptx"
+    ppt_to_pptx: true
+  
+  unstructured:
+    enabled: true
+    chunking_strategy: "by_title"
+    max_characters: 1500
+    overlap: 100
+
+target:
+  github_repo: "HIT-A/HITA_RagData"
+  branch: "main"
+  commit_message_template: "Auto-ingest: {source_repo} ({date})"
+  path_structure: "{source_repo}/converted/"
+
+rag:
+  auto_ingest: true
+  collection: "hit-courses"
+  chunk_size: 1400
+  chunk_overlap: 200
+  store_in_cos: true
+  cos_prefix: "rag-content"
