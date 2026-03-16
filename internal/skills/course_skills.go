@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -195,9 +197,12 @@ func parseCourseSearchInput(input map[string]any) CourseSearchInput {
 }
 
 func getPRServerURL() string {
-	return "http://localhost:8081"
+	if url := os.Getenv("PR_SERVER_URL"); url != "" {
+		return strings.TrimRight(url, "/")
+	}
+	return "http://localhost:8080"
 }
 
 func getPRServerToken() string {
-	return ""
+	return os.Getenv("PR_SERVER_TOKEN")
 }

@@ -81,11 +81,11 @@ func (c *Client) CoursePreview(ctx context.Context, req *CoursePreviewRequest) (
 	return &result, nil
 }
 
-// PRLookupRequest is the request body for /v1/pr:lookup.
+// PRLookupRequest is the request for /v1/pr:lookup.
 type PRLookupRequest struct {
-	Org  string `json:"org"`
-	Repo string `json:"repo"`
-	PR   int    `json:"pr"`
+	Org    string `json:"org"`
+	Repo   string `json:"repo"`
+	Number int    `json:"number"`
 }
 
 // PRLookupResponse is the response from /v1/pr:lookup.
@@ -96,25 +96,29 @@ type PRLookupResponse struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
 	Data *struct {
-		Number int    `json:"number"`
 		State  string `json:"state"`
-		Title  string `json:"title"`
 		URL    string `json:"url"`
+		Merged bool   `json:"merged"`
+		Checks *struct {
+			Status     string  `json:"status"`
+			Conclusion *string `json:"conclusion,omitempty"`
+		} `json:"checks,omitempty"`
 	} `json:"data,omitempty"`
 }
 
-// PRLookup calls POST /v1/pr:lookup.
+// PRLookup calls GET /v1/pr:lookup?org=...&repo=...&number=...
 func (c *Client) PRLookup(ctx context.Context, req *PRLookupRequest) (*PRLookupResponse, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
+	// Build query parameters
+	url := fmt.Sprintf("%s/v1/pr:lookup?org=%s&repo=%s&number=%d",
+		c.BaseURL,
+		req.Org,
+		req.Repo,
+		req.Number)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+"/v1/pr:lookup", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {

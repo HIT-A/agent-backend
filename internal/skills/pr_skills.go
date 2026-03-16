@@ -215,9 +215,9 @@ func NewPRLookupSkill() Skill {
 			// Build request to pr-server
 			client := pr.NewClient(getPRServerBaseURL())
 			req := &pr.PRLookupRequest{
-				Org:  org,
-				Repo: repo,
-				PR:   prNum,
+				Org:    org,
+				Repo:   repo,
+				Number: prNum,
 			}
 
 			// Call pr-server
@@ -242,12 +242,21 @@ func NewPRLookupSkill() Skill {
 			}
 
 			// Return PR info
-			return map[string]any{
-				"number": resp.Data.Number,
+			result := map[string]any{
+				"number": prNum,
 				"state":  resp.Data.State,
-				"title":  resp.Data.Title,
 				"url":    resp.Data.URL,
-			}, nil
+				"merged": resp.Data.Merged,
+			}
+			if resp.Data.Checks != nil {
+				result["checks"] = map[string]any{
+					"status": resp.Data.Checks.Status,
+				}
+				if resp.Data.Checks.Conclusion != nil {
+					result["checks"].(map[string]any)["conclusion"] = *resp.Data.Checks.Conclusion
+				}
+			}
+			return result, nil
 		},
 	}
 }
