@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -12,11 +14,15 @@ import (
 
 // CrawlPageInput represents input for crawling a single page
 type CrawlPageInput struct {
-	URL           string   `json:"url"`
-	WaitFor       string   `json:"wait_for,omitempty"`
-	ExcludePaths  []string `json:"exclude_paths,omitempty"`
-	ContentFilter bool     `json:"content_filter"`
-	OutputFormat  string   `json:"output_format"`
+	URL            string   `json:"url"`
+	WaitFor        string   `json:"wait_for,omitempty"`
+	ExcludePaths   []string `json:"exclude_paths,omitempty"`
+	ContentFilter  bool     `json:"content_filter"`
+	OutputFormat   string   `json:"output_format"`
+	QueueToIntake  bool     `json:"queue_to_intake"`
+	IntakeRepo     string   `json:"intake_repo"`
+	IntakeBranch   string   `json:"intake_branch"`
+	IntakeSkillDir string   `json:"intake_skill_dir"`
 }
 
 // CrawlSiteInput represents input for full site crawling
@@ -56,7 +62,7 @@ func NewCrawl4AIPageSkill(mcpRegistry *mcp.Registry) Skill {
 			// Get MCP server
 			server, exists := mcpRegistry.Get("crawl4ai")
 			if !exists {
-				return nil, &InvokeError{Code: "NOT_FOUND", Message: "crawl4ai MCP server not registered. Register it first using mcp.register_server", Retryable: false}
+				return nil, &InvokeError{Code: "NOT_FOUND", Message: "crawl4ai MCP server not available in backend configuration", Retryable: false}
 			}
 
 			if !server.Initialized {
@@ -80,6 +86,22 @@ func NewCrawl4AIPageSkill(mcpRegistry *mcp.Registry) Skill {
 			result, err := callMCPTool(ctx, server, "crawl_page", args)
 			if err != nil {
 				return nil, &InvokeError{Code: "INTERNAL", Message: fmt.Sprintf("crawl failed: %v", err), Retryable: true}
+			}
+
+			if in.QueueToIntake {
+				fileName, body := buildCrawlRawSnapshot(in.URL, result)
+				queuedPath, qErr := enqueueRawToGitHub(ctx, in.IntakeRepo, in.IntakeBranch, in.IntakeSkillDir, "crawl4ai", fileName, body)
+				intakeMeta := map[string]any{
+					"enabled": in.QueueToIntake,
+				}
+				if qErr != nil {
+					intakeMeta["queued"] = false
+					intakeMeta["error"] = qErr.Error()
+				} else {
+					intakeMeta["queued"] = true
+					intakeMeta["path"] = queuedPath
+				}
+				result["intake"] = intakeMeta
 			}
 
 			return result, nil
@@ -106,7 +128,7 @@ func NewCrawl4AISiteSkill(mcpRegistry *mcp.Registry, cosStorage interface{}) Ski
 			// Get MCP server
 			server, exists := mcpRegistry.Get("crawl4ai")
 			if !exists {
-				return nil, &InvokeError{Code: "NOT_FOUND", Message: "crawl4ai MCP server not registered. Register it first using mcp.register_server", Retryable: false}
+				return nil, &InvokeError{Code: "NOT_FOUND", Message: "crawl4ai MCP server not available in backend configuration", Retryable: false}
 			}
 
 			if !server.Initialized {
@@ -193,8 +215,12 @@ func NewCrawl4AIStatusSkill(mcpRegistry *mcp.Registry) Skill {
 // parseCrawlPageInput parses and validates crawl page input
 func parseCrawlPageInput(input map[string]any) CrawlPageInput {
 	in := CrawlPageInput{
-		ContentFilter: true,
-		OutputFormat:  "markdown",
+		ContentFilter:  true,
+		OutputFormat:   "markdown",
+		QueueToIntake:  true,
+		IntakeRepo:     "HIT-A/HITA_RagData",
+		IntakeBranch:   "main",
+		IntakeSkillDir: defaultSkillRawDir,
 	}
 
 	if url, ok := input["url"].(string); ok {
@@ -209,6 +235,18 @@ func parseCrawlPageInput(input map[string]any) CrawlPageInput {
 	if outputFormat, ok := input["output_format"].(string); ok {
 		in.OutputFormat = outputFormat
 	}
+	if v, ok := input["queue_to_intake"].(bool); ok {
+		in.QueueToIntake = v
+	}
+	if v, ok := input["intake_repo"].(string); ok && strings.TrimSpace(v) != "" {
+		in.IntakeRepo = strings.TrimSpace(v)
+	}
+	if v, ok := input["intake_branch"].(string); ok && strings.TrimSpace(v) != "" {
+		in.IntakeBranch = strings.TrimSpace(v)
+	}
+	if v, ok := input["intake_skill_dir"].(string); ok && strings.TrimSpace(v) != "" {
+		in.IntakeSkillDir = strings.Trim(strings.TrimSpace(v), "/")
+	}
 	if excludePaths, ok := input["exclude_paths"].([]any); ok {
 		for _, path := range excludePaths {
 			if p, ok := path.(string); ok {
@@ -218,6 +256,33 @@ func parseCrawlPageInput(input map[string]any) CrawlPageInput {
 	}
 
 	return in
+}
+
+func buildCrawlRawSnapshot(rawURL string, result map[string]any) (string, []byte) {
+	name := "crawl-result.md"
+	if u, err := url.Parse(strings.TrimSpace(rawURL)); err == nil {
+		host := strings.ReplaceAll(strings.ToLower(u.Hostname()), ".", "-")
+		if host == "" {
+			host = "crawl"
+		}
+		base := path.Base(strings.TrimSpace(u.Path))
+		if base == "" || base == "." || base == "/" {
+			base = "index"
+		}
+		name = safeName(host+"-"+base) + ".md"
+	}
+
+	if md, ok := result["markdown"].(string); ok && strings.TrimSpace(md) != "" {
+		return name, []byte(md)
+	}
+	if content, ok := result["content"].(string); ok && strings.TrimSpace(content) != "" {
+		return name, []byte(content)
+	}
+	b, _ := json.MarshalIndent(result, "", "  ")
+	if strings.HasSuffix(name, ".md") {
+		name = strings.TrimSuffix(name, ".md") + ".json"
+	}
+	return name, b
 }
 
 // parseCrawlSiteInput parses and validates crawl site input

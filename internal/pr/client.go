@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
 // Client is a minimal HTTP client for pr-server.
 type Client struct {
 	BaseURL    string
+	Token      string
 	HTTPClient *http.Client
 }
 
@@ -66,6 +68,9 @@ func (c *Client) CoursePreview(ctx context.Context, req *CoursePreviewRequest) (
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if c.Token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.Token)
+	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -109,15 +114,18 @@ type PRLookupResponse struct {
 // PRLookup calls GET /v1/pr:lookup?org=...&repo=...&number=...
 func (c *Client) PRLookup(ctx context.Context, req *PRLookupRequest) (*PRLookupResponse, error) {
 	// Build query parameters
-	url := fmt.Sprintf("%s/v1/pr:lookup?org=%s&repo=%s&number=%d",
+	endpoint := fmt.Sprintf("%s/v1/pr:lookup?org=%s&repo=%s&number=%d",
 		c.BaseURL,
-		req.Org,
-		req.Repo,
+		url.QueryEscape(req.Org),
+		url.QueryEscape(req.Repo),
 		req.Number)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
+	}
+	if c.Token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.Token)
 	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
@@ -140,7 +148,8 @@ type CourseSubmitRequest struct {
 		Campus     string `json:"campus"`
 		CourseCode string `json:"course_code"`
 	} `json:"target"`
-	Ops []json.RawMessage `json:"ops"`
+	Ops            []json.RawMessage `json:"ops"`
+	IdempotencyKey string            `json:"idempotency_key"`
 }
 
 // CourseSubmitResponse is the response from /v1/course:submit.
@@ -151,9 +160,22 @@ type CourseSubmitResponse struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
 	Data *struct {
-		PRNumber int    `json:"pr_number"`
-		PRURL    string `json:"pr_url"`
-		Branch   string `json:"branch"`
+		Base struct {
+			Org      string `json:"org"`
+			CacheOrg string `json:"cache_org"`
+			Repo     string `json:"repo"`
+			Ref      string `json:"ref"`
+			TomlPath string `json:"toml_path"`
+		} `json:"base"`
+		Commit struct {
+			SHA string `json:"sha"`
+		} `json:"commit"`
+		PR struct {
+			URL        string `json:"url"`
+			Number     int    `json:"number"`
+			HeadBranch string `json:"head_branch"`
+			BaseBranch string `json:"base_branch"`
+		} `json:"pr"`
 	} `json:"data,omitempty"`
 }
 
@@ -169,6 +191,9 @@ func (c *Client) CourseSubmit(ctx context.Context, req *CourseSubmitRequest) (*C
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if c.Token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.Token)
+	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {

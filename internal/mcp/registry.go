@@ -21,18 +21,20 @@ func NewRegistry() *Registry {
 
 // Register registers a new MCP server
 func (r *Registry) Register(ctx context.Context, config *ServerConfig) (*RegisteredServer, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	name := strings.TrimSpace(config.Name)
 	if name == "" {
 		return nil, fmt.Errorf("server name is required")
 	}
 
-	if _, exists := r.servers[name]; exists {
+	r.mu.RLock()
+	_, exists := r.servers[name]
+	r.mu.RUnlock()
+	if exists {
 		return nil, fmt.Errorf("server '%s' already registered", name)
 	}
 
+	// Build and initialize transport/client outside lock to avoid blocking registry access.
+	// A slow or failed MCP server init should not stall read operations like list/get.
 	// Create MCP client
 	var transport Transport
 	switch config.Transport {
@@ -64,6 +66,12 @@ func (r *Registry) Register(ctx context.Context, config *ServerConfig) (*Registe
 		Tools:        client.GetTools(),
 		Resources:    client.GetResources(),
 		Initialized:  true,
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.servers[name]; exists {
+		return nil, fmt.Errorf("server '%s' already registered", name)
 	}
 
 	r.servers[name] = server

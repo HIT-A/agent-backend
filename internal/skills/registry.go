@@ -4,6 +4,8 @@ import (
 	"context"
 	"hoa-agent-backend/internal/cos"
 	"hoa-agent-backend/internal/mcp"
+	"log"
+	"time"
 )
 
 // Global MCP registry
@@ -30,7 +32,7 @@ func registerDefaultMCPServers() {
 		Transport: "stdio",
 		Command:   []string{"npx", "-y", "@modelcontextprotocol/server-sequential-thinking"},
 	}
-	_, _ = mcpRegistry.Register(context.Background(), sequentialThinkingConfig)
+	registerMCPServerAsync(sequentialThinkingConfig)
 
 	// Anna's Archive MCP Server (文献搜索)
 	// See: https://github.com/iosifache/annas-mcp
@@ -40,9 +42,9 @@ func registerDefaultMCPServers() {
 		Name:      "annas-archive",
 		Enabled:   true,
 		Transport: "stdio",
-		Command:   []string{"npx", "-y", "annas-mcp"},
+		Command:   []string{"/root/agent-backend/bin/annas-mcp", "mcp"},
 	}
-	_, _ = mcpRegistry.Register(context.Background(), annasArchiveConfig)
+	registerMCPServerAsync(annasArchiveConfig)
 
 	// arXiv MCP Server (论文搜索)
 	// See: https://github.com/blazickjp/arxiv-mcp-server
@@ -50,9 +52,9 @@ func registerDefaultMCPServers() {
 		Name:      "arxiv",
 		Enabled:   true,
 		Transport: "stdio",
-		Command:   []string{"npx", "-y", "arxiv-mcp-server"},
+		Command:   []string{"python3", "/root/agent-backend/mcp-servers/arxiv/server.py"},
 	}
-	_, _ = mcpRegistry.Register(context.Background(), arxivConfig)
+	registerMCPServerAsync(arxivConfig)
 
 	// Brave Search MCP Server (网页搜索)
 	// See: https://github.com/brave/brave-search-mcp-server
@@ -61,9 +63,32 @@ func registerDefaultMCPServers() {
 		Name:      "brave-search",
 		Enabled:   true,
 		Transport: "stdio",
-		Command:   []string{"npx", "-y", "brave-search-mcp-server"},
+		Command:   []string{"python3", "/root/agent-backend/mcp-servers/brave/server.py"},
 	}
-	_, _ = mcpRegistry.Register(context.Background(), braveConfig)
+	registerMCPServerAsync(braveConfig)
+
+	// Local Crawl4AI MCP Server (网页爬取)
+	// Uses the bundled server implementation under mcp-servers/crawl4ai.
+	crawl4AIConfig := &mcp.ServerConfig{
+		Name:      "crawl4ai",
+		Enabled:   true,
+		Transport: "stdio",
+		Command:   []string{"python3", "/root/agent-backend/mcp-servers/crawl4ai/server.py"},
+	}
+	registerMCPServerAsync(crawl4AIConfig)
+}
+
+func registerMCPServerAsync(config *mcp.ServerConfig) {
+	if config == nil || !config.Enabled {
+		return
+	}
+	go func(cfg *mcp.ServerConfig) {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		if _, err := mcpRegistry.Register(ctx, cfg); err != nil {
+			log.Printf("[mcp] default register failed: name=%s err=%v", cfg.Name, err)
+		}
+	}(config)
 }
 
 // GetMCPRegistry returns the global MCP registry
@@ -141,6 +166,9 @@ func NewRegistry() *Registry {
 
 	// Register RAG sync to repo skill
 	r.Register(NewRAGSyncToRepoSkill(cosStorage))
+
+	// Register manual intake folder pipeline skill
+	r.Register(NewRAGIntakeManualFolderSkill(cosStorage))
 
 	return r
 }

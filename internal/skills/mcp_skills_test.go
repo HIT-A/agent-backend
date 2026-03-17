@@ -37,62 +37,6 @@ func TestMCPListServersSkill(t *testing.T) {
 	}
 }
 
-func TestMCPRegisterServerSkill_InputValidation(t *testing.T) {
-	registry := mcp.NewRegistry()
-	skill := NewMCPRegisterServerSkill(registry)
-
-	tests := []struct {
-		name    string
-		input   map[string]any
-		wantErr bool
-		errCode string
-	}{
-		{
-			name:    "missing name",
-			input:   map[string]any{},
-			wantErr: true,
-			errCode: "INVALID_INPUT",
-		},
-		{
-			name:    "missing transport",
-			input:   map[string]any{"name": "test"},
-			wantErr: true,
-			errCode: "INVALID_INPUT",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := skill.Invoke(context.Background(), tt.input, nil)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Invoke() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if err != nil && tt.errCode != "" {
-				if invokeErr, ok := err.(*InvokeError); ok {
-					if invokeErr.Code != tt.errCode {
-						t.Errorf("Invoke() error code = %v, want %v", invokeErr.Code, tt.errCode)
-					}
-				} else {
-					t.Errorf("Invoke() error is not InvokeError")
-				}
-			}
-		})
-	}
-}
-
-func TestMCPUnregisterServerSkill_InputValidation(t *testing.T) {
-	registry := mcp.NewRegistry()
-	skill := NewMCPUnregisterServerSkill(registry)
-
-	t.Run("missing name", func(t *testing.T) {
-		_, err := skill.Invoke(context.Background(), map[string]any{}, nil)
-		if err == nil {
-			t.Error("expected error for missing name")
-		}
-	})
-}
-
 func TestMCPCallToolSkill_InputValidation(t *testing.T) {
 	registry := mcp.NewRegistry()
 	skill := NewMCPCallToolSkill(registry)

@@ -15,12 +15,57 @@ from urllib.parse import urljoin, urlparse
 
 # Add crawl4ai to path (will be installed in Docker)
 try:
-    from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+    from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
     from crawl4ai.content_filter_strategy import PruningContentFilter
     from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 except ImportError:
     print("Warning: crawl4ai not installed. Running in mock mode.", file=sys.stderr)
     AsyncWebCrawler = None
+
+
+def _build_browser_config() -> "BrowserConfig":
+    """Use conservative Playwright flags for server environments."""
+    extra_args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+    proxy = os.environ.get("CRAWL4AI_PROXY")
+    return BrowserConfig(
+        browser_type="chromium",
+        channel="chromium",
+        headless=True,
+        extra_args=extra_args,
+        proxy=proxy,
+    )
+
+
+def _extract_markdown(result: Any) -> Dict[str, str]:
+    """Handle both legacy (markdown_v2) and newer (markdown) result structures."""
+    raw_markdown = ""
+    fit_markdown = ""
+
+    markdown_v2 = getattr(result, "markdown_v2", None)
+    if markdown_v2 is not None:
+        raw_markdown = getattr(markdown_v2, "raw_markdown", "") or ""
+        fit_markdown = getattr(markdown_v2, "fit_markdown", "") or ""
+
+    if not raw_markdown:
+        markdown = getattr(result, "markdown", None)
+        if markdown is not None:
+            raw_markdown = getattr(markdown, "raw_markdown", "") or str(markdown)
+            fit_markdown = getattr(markdown, "fit_markdown", "") or ""
+
+    return {
+        "raw": raw_markdown,
+        "fit": str(fit_markdown) if fit_markdown is not None else "",
+    }
+
+
+def _extract_text(result: Any) -> str:
+    text = getattr(result, "text", None)
+    if text:
+        return text
+    md = _extract_markdown(result).get("raw", "")
+    if md:
+        return md
+    return getattr(result, "cleaned_html", "") or getattr(result, "html", "") or ""
 
 from mcp.server import Server
 from mcp.types import Tool, TextContent
@@ -232,30 +277,32 @@ async def crawl_single_page(args: Dict[str, Any]) -> Dict[str, Any]:
     if content_filter:
         config.content_filter = PruningContentFilter()
 
-    async with AsyncWebCrawler(verbose=True) as crawler:
+    async with AsyncWebCrawler(config=_build_browser_config(), verbose=True) as crawler:
         result = await crawler.arun(url=url, config=config)
+        markdown = _extract_markdown(result)
+        text = _extract_text(result)
 
         response = {
             "url": url,
             "success": result.success,
-            "status_code": result.status_code,
+            "status_code": getattr(result, "status_code", None),
             "title": result.metadata.get("title", ""),
-            "timestamp": result.timestamp,
+            "timestamp": getattr(result, "timestamp", None),
         }
 
         if result.success:
             if output_format == "markdown":
-                response["content"] = result.markdown_v2.raw_markdown
-                response["fit_markdown"] = result.markdown_v2.fit_markdown
+                response["content"] = markdown["raw"]
+                response["fit_markdown"] = markdown["fit"]
             elif output_format == "html":
                 response["content"] = result.html
             elif output_format == "text":
-                response["content"] = result.text
+                response["content"] = text
 
             response["metadata"] = {
                 "links": result.links,
-                "images": result.images,
-                "word_count": len(result.text.split()) if result.text else 0,
+                "images": getattr(result, "images", []),
+                "word_count": len(text.split()) if text else 0,
             }
         else:
             response["error"] = result.error_message
@@ -334,7 +381,7 @@ async def _run_site_crawl(**kwargs):
         pages_crawled = []
         errors = []
 
-        async with AsyncWebCrawler(verbose=True) as crawler:
+        async with AsyncWebCrawler(config=_build_browser_config(), verbose=True) as crawler:
             # Try sitemap first if enabled
             if kwargs["use_sitemap"]:
                 sitemap_url = urljoin(start_url, "/sitemap.xml")
@@ -372,17 +419,17 @@ async def _run_site_crawl(**kwargs):
 
                 try:
                     result = await crawler.arun(url=url, config=config)
+                    markdown = _extract_markdown(result)
+                    text = _extract_text(result)
 
                     if result.success:
                         pages_crawled.append(
                             {
                                 "url": url,
                                 "title": result.metadata.get("title", ""),
-                                "markdown": result.markdown_v2.raw_markdown,
-                                "fit_markdown": result.markdown_v2.fit_markdown,
-                                "word_count": len(result.text.split())
-                                if result.text
-                                else 0,
+                                "markdown": markdown["raw"],
+                                "fit_markdown": markdown["fit"],
+                                "word_count": len(text.split()) if text else 0,
                                 "depth": depth,
                             }
                         )
@@ -461,11 +508,13 @@ async def extract_structured(args: Dict[str, Any]) -> Dict[str, Any]:
         cache_mode=CacheMode.BYPASS,
     )
 
-    async with AsyncWebCrawler(verbose=True) as crawler:
+    async with AsyncWebCrawler(config=_build_browser_config(), verbose=True) as crawler:
         result = await crawler.arun(url=url, config=config)
 
         if not result.success:
             return {"error": result.error_message}
+
+        text = _extract_text(result)
 
         # For LLM extraction, we'd use an LLM to extract based on schema
         # For CSS/XPath, we'd use the appropriate selectors
@@ -476,7 +525,7 @@ async def extract_structured(args: Dict[str, Any]) -> Dict[str, Any]:
             "method": method,
             "schema": schema,
             "instructions": instructions,
-            "content_preview": result.text[:1000] if result.text else "",
+            "content_preview": text[:1000] if text else "",
             "note": "Structured extraction requires LLM integration. Content preview provided.",
         }
 

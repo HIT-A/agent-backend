@@ -1,11 +1,17 @@
 package mcp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -82,6 +88,12 @@ type StdioTransport struct {
 	Command     []string
 	idGenerator *IDGenerator
 	initialized bool
+
+	mu     sync.Mutex
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	reader *bufio.Reader
 }
 
 func NewStdioTransport(command []string) *StdioTransport {
@@ -92,9 +104,164 @@ func NewStdioTransport(command []string) *StdioTransport {
 }
 
 func (t *StdioTransport) Send(ctx context.Context, msg *Message) (*Message, error) {
-	return nil, fmt.Errorf("stdio transport not yet implemented")
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if err := t.ensureProcess(); err != nil {
+		return nil, err
+	}
+
+	msg.ID = t.idGenerator.Next()
+	msg.JSONRPC = "2.0"
+
+	body, err := json.Marshal(msg)
+	if err != nil {
+		return nil, fmt.Errorf("marshal message: %w", err)
+	}
+
+	// Prefer line-delimited JSON-RPC for stdio (widely used by MCP servers);
+	// reader still accepts Content-Length framed responses for compatibility.
+	if _, err := t.stdin.Write(append(body, '\n')); err != nil {
+		return nil, fmt.Errorf("write body: %w", err)
+	}
+
+	for {
+		respBody, err := readMCPMessage(t.reader)
+		if err != nil {
+			return nil, fmt.Errorf("read response: %w", err)
+		}
+
+		var resp Message
+		if err := json.Unmarshal(respBody, &resp); err != nil {
+			continue
+		}
+
+		if resp.ID == nil {
+			continue
+		}
+
+		if sameMessageID(resp.ID, msg.ID) {
+			return &resp, nil
+		}
+	}
 }
 
 func (t *StdioTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.stdin != nil {
+		_ = t.stdin.Close()
+		t.stdin = nil
+	}
+	if t.stdout != nil {
+		_ = t.stdout.Close()
+		t.stdout = nil
+	}
+	if t.cmd != nil && t.cmd.Process != nil {
+		_ = t.cmd.Process.Kill()
+		_, _ = t.cmd.Process.Wait()
+		t.cmd = nil
+	}
+	t.reader = nil
+	t.initialized = false
 	return nil
+}
+
+func (t *StdioTransport) ensureProcess() error {
+	if t.cmd != nil {
+		if t.cmd.ProcessState == nil || !t.cmd.ProcessState.Exited() {
+			return nil
+		}
+	}
+	if len(t.Command) == 0 {
+		return fmt.Errorf("stdio command is empty")
+	}
+
+	cmd := exec.Command(t.Command[0], t.Command[1:]...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("create stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("create stdout pipe: %w", err)
+	}
+	cmd.Stderr = io.Discard
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start stdio command: %w", err)
+	}
+
+	t.cmd = cmd
+	t.stdin = stdin
+	t.stdout = stdout
+	t.reader = bufio.NewReader(stdout)
+	t.initialized = true
+	return nil
+}
+
+func readMCPMessage(r *bufio.Reader) ([]byte, error) {
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "content-length:") {
+			contentLen, err := parseContentLength(trimmed)
+			if err != nil {
+				return nil, err
+			}
+
+			for {
+				h, err := r.ReadString('\n')
+				if err != nil {
+					return nil, err
+				}
+				if strings.TrimSpace(h) == "" {
+					break
+				}
+				th := strings.TrimSpace(h)
+				if strings.HasPrefix(strings.ToLower(th), "content-length:") {
+					if n, err := parseContentLength(th); err == nil {
+						contentLen = n
+					}
+				}
+			}
+
+			body := make([]byte, contentLen)
+			if _, err := io.ReadFull(r, body); err != nil {
+				return nil, err
+			}
+			return body, nil
+		}
+
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			return []byte(trimmed), nil
+		}
+	}
+}
+
+func parseContentLength(headerLine string) (int, error) {
+	v := strings.TrimSpace(headerLine[len("Content-Length:"):])
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid content-length %q", v)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("invalid negative content-length %d", n)
+	}
+	return n, nil
+}
+
+func sameMessageID(a, b interface{}) bool {
+	as := fmt.Sprintf("%v", a)
+	bs := fmt.Sprintf("%v", b)
+	return as == bs
 }

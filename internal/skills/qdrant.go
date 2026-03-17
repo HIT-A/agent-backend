@@ -201,3 +201,65 @@ func (c *QdrantClient) Upsert(ctx context.Context, collection string, points []Q
 
 	return nil
 }
+
+func (c *QdrantClient) DeleteByDocID(ctx context.Context, collection, docID string) error {
+	if c == nil {
+		return errors.New("nil qdrant client")
+	}
+	if c.HTTP == nil {
+		c.HTTP = http.DefaultClient
+	}
+	col := collection
+	if strings.TrimSpace(col) == "" {
+		col = c.Collection
+	}
+	if strings.TrimSpace(col) == "" {
+		return errors.New("qdrant collection is required")
+	}
+	if strings.TrimSpace(docID) == "" {
+		return errors.New("docID is required")
+	}
+
+	endpoint := fmt.Sprintf("%s/collections/%s/points/delete?wait=true", c.BaseURL, col)
+	body, err := json.Marshal(map[string]any{
+		"filter": map[string]any{
+			"must": []map[string]any{
+				{
+					"key": "doc_id",
+					"match": map[string]any{
+						"value": docID,
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		req.Header.Set("api-key", c.APIKey)
+	}
+
+	ctx2, cancel := context.WithTimeout(req.Context(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 8<<10))
+		return fmt.Errorf("qdrant delete failed: status=%d body=%q", res.StatusCode, string(b))
+	}
+
+	return nil
+}

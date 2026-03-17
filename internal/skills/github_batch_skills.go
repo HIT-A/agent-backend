@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,20 +16,22 @@ import (
 
 // GitHubBatchDownloadInput represents batch download input
 type GitHubBatchDownloadInput struct {
-	Repos         []string `json:"repos"`
-	FileTypes     []string `json:"file_types"`
-	MaxFileSize   int64    `json:"max_file_size"`    // 单个文件最大大小 (字节)
-	MaxRepoSizeMB int      `json:"max_repo_size_mb"` // 仓库最大大小 (MB)，0表示不限制
-	MaxFiles      int      `json:"max_files"`
-	ConvertToMD   bool     `json:"convert_to_md"`
-	PushToGitHub  bool     `json:"push_to_github"`
-	TargetRepo    string   `json:"target_repo"`
-	TargetBranch  string   `json:"target_branch"`
-	StoreInCOS    bool     `json:"store_in_cos"`
-	COSPrefix     string   `json:"cos_prefix"`
-	AutoIngestRAG bool     `json:"auto_ingest_rag"`
-	RAGSource     string   `json:"rag_source"`
-	Workers       int      `json:"workers"`
+	Repos          []string `json:"repos"`
+	FileTypes      []string `json:"file_types"`
+	MaxFileSize    int64    `json:"max_file_size"`    // 单个文件最大大小 (字节)
+	MaxRepoSizeMB  int      `json:"max_repo_size_mb"` // 仓库最大大小 (MB)，0表示不限制
+	MaxFiles       int      `json:"max_files"`
+	ConvertToMD    bool     `json:"convert_to_md"`
+	PushToGitHub   bool     `json:"push_to_github"`
+	TargetRepo     string   `json:"target_repo"`
+	TargetBranch   string   `json:"target_branch"`
+	StoreInCOS     bool     `json:"store_in_cos"`
+	COSPrefix      string   `json:"cos_prefix"`
+	AutoIngestRAG  bool     `json:"auto_ingest_rag"`
+	RAGSource      string   `json:"rag_source"`
+	QueueToIntake  bool     `json:"queue_to_intake"`
+	IntakeSkillDir string   `json:"intake_skill_dir"`
+	Workers        int      `json:"workers"`
 }
 
 // DownloadedFile represents a downloaded file
@@ -39,6 +42,8 @@ type DownloadedFile struct {
 	Content     string `json:"content_base64"`
 	ContentType string `json:"content_type"`
 	Converted   string `json:"converted_markdown,omitempty"`
+	IntakePath  string `json:"intake_path,omitempty"`
+	IntakeError string `json:"intake_error,omitempty"`
 	Error       string `json:"error,omitempty"`
 }
 
@@ -129,18 +134,20 @@ func NewRAGIngestFromGitHubSkill(mcpRegistry *mcp.Registry, cosStorage *cos.Stor
 
 func parseBatchDownloadInput(input map[string]any) GitHubBatchDownloadInput {
 	in := GitHubBatchDownloadInput{
-		MaxFileSize:   10 * 1024 * 1024, // 10MB 单文件上限
-		MaxRepoSizeMB: 500,              // 500MB 仓库上限，超过跳过
-		MaxFiles:      1000,
-		ConvertToMD:   true,
-		PushToGitHub:  true,
-		TargetRepo:    "HIT-A/HITA_RagData",
-		TargetBranch:  "main",
-		StoreInCOS:    true,
-		COSPrefix:     "rag-content",
-		AutoIngestRAG: true,
-		Workers:       4,
-		FileTypes:     []string{".pdf", ".docx", ".doc", ".pptx", ".ppt", ".txt", ".md", ".rtf"},
+		MaxFileSize:    10 * 1024 * 1024, // 10MB 单文件上限
+		MaxRepoSizeMB:  500,              // 500MB 仓库上限，超过跳过
+		MaxFiles:       1000,
+		ConvertToMD:    true,
+		PushToGitHub:   true,
+		TargetRepo:     "HIT-A/HITA_RagData",
+		TargetBranch:   "main",
+		StoreInCOS:     true,
+		COSPrefix:      "rag-content",
+		AutoIngestRAG:  true,
+		QueueToIntake:  true,
+		IntakeSkillDir: defaultSkillRawDir + "/github",
+		Workers:        4,
+		FileTypes:      []string{".pdf", ".docx", ".doc", ".pptx", ".ppt", ".txt", ".md", ".rtf"},
 	}
 
 	if repos, ok := input["repos"].([]any); ok {
@@ -189,6 +196,12 @@ func parseBatchDownloadInput(input map[string]any) GitHubBatchDownloadInput {
 	}
 	if ragSource, ok := input["rag_source"].(string); ok {
 		in.RAGSource = ragSource
+	}
+	if queueToIntake, ok := input["queue_to_intake"].(bool); ok {
+		in.QueueToIntake = queueToIntake
+	}
+	if intakeSkillDir, ok := input["intake_skill_dir"].(string); ok && strings.TrimSpace(intakeSkillDir) != "" {
+		in.IntakeSkillDir = strings.Trim(strings.TrimSpace(intakeSkillDir), "/")
 	}
 	if workers, ok := input["workers"].(float64); ok {
 		in.Workers = int(workers)
@@ -256,15 +269,56 @@ func executeBatchDownload(ctx context.Context, in GitHubBatchDownloadInput, mcpR
 		allFiles = append(allFiles, files...)
 	}
 
-	return map[string]any{
-		"total_repos":   len(in.Repos),
-		"total_files":   atomic.LoadInt64(&totalFiles),
-		"success_count": atomic.LoadInt64(&successCount),
-		"fail_count":    atomic.LoadInt64(&failCount),
-		"total_size_mb": float64(atomic.LoadInt64(&totalSize)) / (1024 * 1024),
-		"duration_ms":   time.Since(start).Milliseconds(),
-		"files":         allFiles,
+	intakeEnqueued := 0
+	intakeFailed := 0
+	if in.QueueToIntake {
+		intakeEnqueued, intakeFailed = enqueueDownloadedFilesToIntake(ctx, in, allFiles)
 	}
+
+	return map[string]any{
+		"total_repos":     len(in.Repos),
+		"total_files":     atomic.LoadInt64(&totalFiles),
+		"success_count":   atomic.LoadInt64(&successCount),
+		"fail_count":      atomic.LoadInt64(&failCount),
+		"intake_enqueued": intakeEnqueued,
+		"intake_failed":   intakeFailed,
+		"total_size_mb":   float64(atomic.LoadInt64(&totalSize)) / (1024 * 1024),
+		"duration_ms":     time.Since(start).Milliseconds(),
+		"files":           allFiles,
+	}
+}
+
+func enqueueDownloadedFilesToIntake(ctx context.Context, in GitHubBatchDownloadInput, files []DownloadedFile) (int, int) {
+	enqueued := 0
+	failed := 0
+
+	for i := range files {
+		if files[i].Error != "" || strings.TrimSpace(files[i].Content) == "" {
+			continue
+		}
+		b, err := base64.StdEncoding.DecodeString(files[i].Content)
+		if err != nil {
+			files[i].IntakeError = "decode failed: " + err.Error()
+			failed++
+			continue
+		}
+
+		sourceTag := "github/" + strings.ReplaceAll(files[i].Repo, "/", "-")
+		name := path.Base(files[i].Path)
+		if name == "" || name == "." || name == "/" {
+			name = "file.bin"
+		}
+		queuedPath, err := enqueueRawToGitHub(ctx, in.TargetRepo, in.TargetBranch, in.IntakeSkillDir, sourceTag, name, b)
+		if err != nil {
+			files[i].IntakeError = err.Error()
+			failed++
+			continue
+		}
+		files[i].IntakePath = queuedPath
+		enqueued++
+	}
+
+	return enqueued, failed
 }
 
 func downloadFromRepo(ctx context.Context, repo string, in GitHubBatchDownloadInput, mcpRegistry *mcp.Registry) []DownloadedFile {

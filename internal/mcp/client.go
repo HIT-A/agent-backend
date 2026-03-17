@@ -32,7 +32,7 @@ func (c *Client) Initialize(ctx context.Context) error {
 	req := &Message{
 		Method: "initialize",
 		Params: InitializeParams{
-			ProtocolVersion: "2024-11-05",
+			ProtocolVersion: "2025-03-26",
 			Capabilities: ClientCapabilities{
 				Resources: &ResourcesCapability{},
 				Tools:     &ToolsCapability{},

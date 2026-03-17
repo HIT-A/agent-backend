@@ -3,8 +3,10 @@ package skills
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"hoa-agent-backend/internal/pr"
 )
@@ -60,6 +62,7 @@ func NewPRPreviewSkill() Skill {
 
 			// Build request to pr-server
 			client := pr.NewClient(getPRServerBaseURL())
+			client.Token = getPRServerToken()
 			req := &pr.CoursePreviewRequest{}
 			req.Target.Campus = campus
 			req.Target.CourseCode = courseCode
@@ -144,10 +147,16 @@ func NewPRSubmitSkill() Skill {
 
 			// Build request to pr-server
 			client := pr.NewClient(getPRServerBaseURL())
+			client.Token = getPRServerToken()
 			req := &pr.CourseSubmitRequest{}
 			req.Target.Campus = campus
 			req.Target.CourseCode = courseCode
 			req.Ops = ops
+			if idem, ok := input["idempotency_key"].(string); ok && strings.TrimSpace(idem) != "" {
+				req.IdempotencyKey = strings.TrimSpace(idem)
+			} else {
+				req.IdempotencyKey = fmt.Sprintf("%s:%s:%d", strings.ToLower(campus), strings.ToUpper(courseCode), time.Now().UnixNano())
+			}
 
 			// Call pr-server
 			resp, err := client.CourseSubmit(ctx, req)
@@ -172,9 +181,9 @@ func NewPRSubmitSkill() Skill {
 
 			// Return PR info
 			return map[string]any{
-				"pr_number": resp.Data.PRNumber,
-				"pr_url":    resp.Data.PRURL,
-				"branch":    resp.Data.Branch,
+				"pr_number": resp.Data.PR.Number,
+				"pr_url":    resp.Data.PR.URL,
+				"branch":    resp.Data.PR.HeadBranch,
 			}, nil
 		},
 	}
@@ -203,17 +212,22 @@ func NewPRLookupSkill() Skill {
 			}
 
 			prNum := 0
-			if v, ok := input["pr"].(float64); ok {
+			if v, ok := input["number"].(float64); ok {
+				prNum = int(v)
+			} else if v, ok := input["number"].(int); ok {
+				prNum = v
+			} else if v, ok := input["pr"].(float64); ok {
 				prNum = int(v)
 			} else if v, ok := input["pr"].(int); ok {
 				prNum = v
 			}
 			if prNum <= 0 {
-				return nil, &InvokeError{Code: "INVALID_INPUT", Message: "pr is required and must be positive", Retryable: false}
+				return nil, &InvokeError{Code: "INVALID_INPUT", Message: "number (or pr) is required and must be positive", Retryable: false}
 			}
 
 			// Build request to pr-server
 			client := pr.NewClient(getPRServerBaseURL())
+			client.Token = getPRServerToken()
 			req := &pr.PRLookupRequest{
 				Org:    org,
 				Repo:   repo,

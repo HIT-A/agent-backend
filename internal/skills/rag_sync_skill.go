@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -148,8 +149,12 @@ func parseRAGSyncConfig(input map[string]any) RAGSyncConfig {
 
 	if repo, ok := input["target_repo"].(string); ok {
 		config.TargetRepo = repo
+	} else if repo, ok := input["repo"].(string); ok {
+		config.TargetRepo = repo
 	}
 	if branch, ok := input["target_branch"].(string); ok {
+		config.TargetBranch = branch
+	} else if branch, ok := input["branch"].(string); ok {
 		config.TargetBranch = branch
 	}
 	if path, ok := input["local_path"].(string); ok {
@@ -211,15 +216,20 @@ func prepareLocalRepo(ctx context.Context, config RAGSyncConfig) (string, error)
 	// 检查是否已经克隆
 	if _, err := os.Stat(filepath.Join(repoPath, ".git")); os.IsNotExist(err) {
 		// 克隆仓库
-		cloneURL := fmt.Sprintf("https://github.com/%s.git", config.TargetRepo)
+		cloneURL := buildGitHubCloneURL(config.TargetRepo)
 		cmd := exec.CommandContext(ctx, "git", "clone", "-b", config.TargetBranch, cloneURL, repoPath)
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("git clone failed: %w\n%s", err, output)
 		}
 	} else {
+		if err := configureGitRemoteForAuth(ctx, repoPath, config.TargetRepo); err != nil {
+			return "", fmt.Errorf("configure git remote auth failed: %w", err)
+		}
 		// 拉取最新代码
 		cmd := exec.CommandContext(ctx, "git", "pull", "origin", config.TargetBranch)
 		cmd.Dir = repoPath
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("git pull failed: %w\n%s", err, output)
 		}
@@ -437,6 +447,10 @@ func updateIndex(repoPath string, allMetadata []SourceMetadata) error {
 }
 
 func gitCommitAndPush(ctx context.Context, repoPath string, config RAGSyncConfig) (string, error) {
+	if err := ensureGitIdentity(ctx, repoPath); err != nil {
+		return "", fmt.Errorf("configure git identity failed: %w", err)
+	}
+
 	// git add
 	cmd := exec.CommandContext(ctx, "git", "add", ".")
 	cmd.Dir = repoPath
@@ -457,8 +471,12 @@ func gitCommitAndPush(ctx context.Context, repoPath string, config RAGSyncConfig
 	}
 
 	// git push
+	if err := configureGitRemoteForAuth(ctx, repoPath, config.TargetRepo); err != nil {
+		return "", fmt.Errorf("configure git remote auth failed: %w", err)
+	}
 	cmd = exec.CommandContext(ctx, "git", "push", "origin", config.TargetBranch)
 	cmd.Dir = repoPath
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("git push failed: %w\n%s", err, output)
 	}
@@ -472,4 +490,54 @@ func gitCommitAndPush(ctx context.Context, repoPath string, config RAGSyncConfig
 	}
 
 	return strings.TrimSpace(string(output)), nil
+}
+
+func ensureGitIdentity(ctx context.Context, repoPath string) error {
+	name := strings.TrimSpace(os.Getenv("GIT_AUTHOR_NAME"))
+	if name == "" {
+		name = "agent-backend-bot"
+	}
+	email := strings.TrimSpace(os.Getenv("GIT_AUTHOR_EMAIL"))
+	if email == "" {
+		email = "agent-backend-bot@localhost"
+	}
+
+	setName := exec.CommandContext(ctx, "git", "config", "user.name", name)
+	setName.Dir = repoPath
+	if output, err := setName.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config user.name failed: %w\n%s", err, output)
+	}
+
+	setEmail := exec.CommandContext(ctx, "git", "config", "user.email", email)
+	setEmail.Dir = repoPath
+	if output, err := setEmail.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config user.email failed: %w\n%s", err, output)
+	}
+
+	return nil
+}
+
+func buildGitHubCloneURL(targetRepo string) string {
+	token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+	if token == "" {
+		return fmt.Sprintf("https://github.com/%s.git", targetRepo)
+	}
+
+	user := strings.TrimSpace(os.Getenv("GITHUB_USERNAME"))
+	if user == "" {
+		user = "x-access-token"
+	}
+
+	return fmt.Sprintf("https://%s:%s@github.com/%s.git", url.QueryEscape(user), url.QueryEscape(token), targetRepo)
+}
+
+func configureGitRemoteForAuth(ctx context.Context, repoPath, targetRepo string) error {
+	cloneURL := buildGitHubCloneURL(targetRepo)
+	cmd := exec.CommandContext(ctx, "git", "remote", "set-url", "origin", cloneURL)
+	cmd.Dir = repoPath
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git remote set-url failed: %w\n%s", err, output)
+	}
+	return nil
 }

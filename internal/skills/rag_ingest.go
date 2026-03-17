@@ -355,7 +355,8 @@ func decodeRAGIngestInput(m map[string]any) (RAGIngestInput, error) {
 
 func stablePointID(docID, chunkID string) string {
 	h := sha256.Sum256([]byte(docID + ":" + chunkID))
-	return hex.EncodeToString(h[:])
+	s := hex.EncodeToString(h[:16])
+	return fmt.Sprintf("%s-%s-%s-%s-%s", s[0:8], s[8:12], s[12:16], s[16:20], s[20:32])
 }
 
 // processedChunks is used for checking max chunks limit across goroutines

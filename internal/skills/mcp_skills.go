@@ -4,11 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
+	"path"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 
 	"hoa-agent-backend/internal/mcp"
 )
+
+var transitURLRegexp = regexp.MustCompile(`https?://[^\s"'<>]+`)
+var localPathRegexp = regexp.MustCompile(`(?i)path:\s*([^\n\r]+)`)
 
 // NewMCPListServersSkill returns a skill that lists all registered MCP servers.
 func NewMCPListServersSkill(registry *mcp.Registry) Skill {
@@ -37,112 +45,6 @@ func NewMCPListServersSkill(registry *mcp.Registry) Skill {
 
 			return map[string]any{
 				"servers": result,
-			}, nil
-		},
-	}
-}
-
-// NewMCPRegisterServerSkill returns a skill that registers a new MCP server.
-func NewMCPRegisterServerSkill(registry *mcp.Registry) Skill {
-	return Skill{
-		Name:    "mcp.register_server",
-		IsAsync: false,
-		Invoke: func(ctx context.Context, input map[string]any, trace map[string]any) (map[string]any, error) {
-			_ = trace
-
-			// Extract required fields
-			name, ok := input["name"].(string)
-			if !ok || strings.TrimSpace(name) == "" {
-				return nil, &InvokeError{Code: "INVALID_INPUT", Message: "name is required", Retryable: false}
-			}
-
-			transport, ok := input["transport"].(string)
-			if !ok || strings.TrimSpace(transport) == "" {
-				return nil, &InvokeError{Code: "INVALID_INPUT", Message: "transport is required (http or stdio)", Retryable: false}
-			}
-
-			// Build server config
-			config := &mcp.ServerConfig{
-				Name:    name,
-				Enabled: true,
-			}
-
-			// Transport-specific config
-			if transport == "http" {
-				url, ok := input["url"].(string)
-				if !ok || strings.TrimSpace(url) == "" {
-					return nil, &InvokeError{Code: "INVALID_INPUT", Message: "url is required for http transport", Retryable: false}
-				}
-				config.Transport = "http"
-				config.URL = url
-			} else if transport == "stdio" {
-				commandRaw, ok := input["command"]
-				if !ok {
-					return nil, &InvokeError{Code: "INVALID_INPUT", Message: "command is required for stdio transport", Retryable: false}
-				}
-
-				var command []string
-				switch v := commandRaw.(type) {
-				case string:
-					command = []string{v}
-				case []string:
-					command = v
-				case []any:
-					command = make([]string, len(v))
-					for i, item := range v {
-						if str, ok := item.(string); ok {
-							command[i] = str
-						}
-					}
-				default:
-					return nil, &InvokeError{Code: "INVALID_INPUT", Message: "command must be a string or array", Retryable: false}
-				}
-
-				config.Transport = "stdio"
-				config.Command = command
-			} else {
-				return nil, &InvokeError{Code: "INVALID_INPUT", Message: fmt.Sprintf("unsupported transport: %s", transport), Retryable: false}
-			}
-
-			// Register the server
-			server, err := registry.Register(ctx, config)
-			if err != nil {
-				return nil, &InvokeError{Code: "INTERNAL", Message: fmt.Sprintf("failed to register MCP server: %v", err), Retryable: false}
-			}
-
-			return map[string]any{
-				"name":        server.Config.Name,
-				"status":      "registered",
-				"tools_count": len(server.Tools),
-				"initialized": server.Initialized,
-			}, nil
-		},
-	}
-}
-
-// NewMCPUnregisterServerSkill returns a skill that unregisters an MCP server.
-func NewMCPUnregisterServerSkill(registry *mcp.Registry) Skill {
-	return Skill{
-		Name:    "mcp.unregister_server",
-		IsAsync: false,
-		Invoke: func(ctx context.Context, input map[string]any, trace map[string]any) (map[string]any, error) {
-			_ = trace
-
-			// Extract required fields
-			name, ok := input["name"].(string)
-			if !ok || strings.TrimSpace(name) == "" {
-				return nil, &InvokeError{Code: "INVALID_INPUT", Message: "name is required", Retryable: false}
-			}
-
-			// Unregister the server
-			err := registry.Unregister(name)
-			if err != nil {
-				return nil, &InvokeError{Code: "NOT_FOUND", Message: err.Error(), Retryable: false}
-			}
-
-			return map[string]any{
-				"name":   name,
-				"status": "unregistered",
 			}, nil
 		},
 	}
@@ -220,13 +122,230 @@ func NewMCPCallToolSkill(registry *mcp.Registry) Skill {
 				return nil, &InvokeError{Code: "INTERNAL", Message: fmt.Sprintf("failed to call tool '%s': %v", toolName, err), Retryable: true}
 			}
 
-			return map[string]any{
+			output := map[string]any{
 				"server": serverName,
 				"tool":   toolName,
 				"result": result,
-			}, nil
+			}
+			if intakeMeta := maybeQueueTransitOutput(ctx, serverName, toolName, arguments, result); intakeMeta != nil {
+				output["intake"] = intakeMeta
+			}
+			return output, nil
 		},
 	}
+}
+
+func maybeQueueTransitOutput(ctx context.Context, serverName, toolName string, arguments map[string]any, result *mcp.ToolCallResult) map[string]any {
+	server := strings.ToLower(strings.TrimSpace(serverName))
+	tool := strings.ToLower(strings.TrimSpace(toolName))
+
+	if server == "arxiv" {
+		return map[string]any{
+			"mode":      "transit_only",
+			"persisted": false,
+			"reason":    "arxiv is configured as transit-only",
+		}
+	}
+
+	if server != "annas-archive" || !strings.Contains(tool, "download") {
+		return nil
+	}
+
+	localFilePath := firstLocalPath(result)
+	if localFilePath != "" {
+		resolvedPath, resolveErr := resolveDownloadedPath(localFilePath, arguments)
+		if resolveErr != nil {
+			return map[string]any{
+				"mode":        "transit_with_intake",
+				"persisted":   false,
+				"source_path": localFilePath,
+				"reason":      resolveErr.Error(),
+			}
+		}
+		localFilePath = resolvedPath
+
+		b, err := os.ReadFile(localFilePath)
+		if err != nil {
+			return map[string]any{
+				"mode":        "transit_with_intake",
+				"persisted":   false,
+				"source_path": localFilePath,
+				"reason":      "read local download failed: " + err.Error(),
+			}
+		}
+		if len(b) > 25*1024*1024 {
+			return map[string]any{
+				"mode":        "transit_with_intake",
+				"persisted":   false,
+				"source_path": localFilePath,
+				"reason":      "file too large for intake (>25MB)",
+			}
+		}
+
+		filename := path.Base(localFilePath)
+		if strings.TrimSpace(filename) == "" {
+			filename = "annas-download.bin"
+		}
+		queuedPath, qErr := enqueueRawToGitHub(ctx, "HIT-A/HITA_RagData", "main", defaultSkillRawDir, "annas", filename, b)
+		if qErr != nil {
+			return map[string]any{
+				"mode":        "transit_with_intake",
+				"persisted":   false,
+				"source_path": localFilePath,
+				"reason":      qErr.Error(),
+			}
+		}
+
+		_ = os.Remove(localFilePath)
+		return map[string]any{
+			"mode":        "transit_with_intake",
+			"persisted":   true,
+			"source_path": localFilePath,
+			"size":        len(b),
+			"path":        queuedPath,
+		}
+	}
+
+	downloadURL := firstTransitURL(result)
+	if downloadURL == "" {
+		return map[string]any{
+			"mode":      "transit_with_intake",
+			"persisted": false,
+			"reason":    "no download url found in annas result",
+		}
+	}
+
+	b, err := downloadFromURL(ctx, downloadURL)
+	if err != nil {
+		return map[string]any{
+			"mode":       "transit_with_intake",
+			"persisted":  false,
+			"source_url": downloadURL,
+			"reason":     "download failed: " + err.Error(),
+		}
+	}
+	if len(b) > 25*1024*1024 {
+		return map[string]any{
+			"mode":       "transit_with_intake",
+			"persisted":  false,
+			"source_url": downloadURL,
+			"reason":     "file too large for intake (>25MB)",
+		}
+	}
+
+	filename := guessTransitFilename(arguments, downloadURL)
+	queuedPath, qErr := enqueueRawToGitHub(ctx, "HIT-A/HITA_RagData", "main", defaultSkillRawDir, "annas", filename, b)
+	if qErr != nil {
+		return map[string]any{
+			"mode":       "transit_with_intake",
+			"persisted":  false,
+			"source_url": downloadURL,
+			"reason":     qErr.Error(),
+		}
+	}
+
+	return map[string]any{
+		"mode":       "transit_with_intake",
+		"persisted":  true,
+		"source_url": downloadURL,
+		"size":       len(b),
+		"path":       queuedPath,
+	}
+}
+
+func firstLocalPath(result *mcp.ToolCallResult) string {
+	if result == nil {
+		return ""
+	}
+	for _, c := range result.Content {
+		m := localPathRegexp.FindStringSubmatch(c.Text)
+		if len(m) < 2 {
+			continue
+		}
+		p := strings.TrimSpace(m[1])
+		p = strings.Trim(p, "\"")
+		if strings.HasPrefix(p, "/") {
+			return p
+		}
+	}
+	return ""
+}
+
+func firstTransitURL(result *mcp.ToolCallResult) string {
+	if result == nil {
+		return ""
+	}
+	for _, c := range result.Content {
+		for _, m := range transitURLRegexp.FindAllString(c.Text, -1) {
+			trimmed := strings.TrimSpace(m)
+			if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func guessTransitFilename(arguments map[string]any, rawURL string) string {
+	candidates := []string{"filename", "file_name", "name", "title"}
+	for _, k := range candidates {
+		if v, ok := arguments[k].(string); ok && strings.TrimSpace(v) != "" {
+			name := strings.TrimSpace(v)
+			if path.Ext(name) == "" {
+				name += ".bin"
+			}
+			return name
+		}
+	}
+	if u, err := url.Parse(strings.TrimSpace(rawURL)); err == nil {
+		base := path.Base(strings.TrimSpace(u.Path))
+		if base != "" && base != "." && base != "/" {
+			return base
+		}
+	}
+	return "annas-download.bin"
+}
+
+func resolveDownloadedPath(localPath string, arguments map[string]any) (string, error) {
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return "", fmt.Errorf("stat local download failed: %w", err)
+	}
+	if !info.IsDir() {
+		return localPath, nil
+	}
+
+	name := guessTransitFilename(arguments, "")
+	candidate := filepath.Join(localPath, name)
+	if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+		return candidate, nil
+	}
+
+	entries, err := os.ReadDir(localPath)
+	if err != nil {
+		return "", fmt.Errorf("read local download dir failed: %w", err)
+	}
+	var (
+		latestPath string
+		latestTime time.Time
+	)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		fi, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if latestPath == "" || fi.ModTime().After(latestTime) {
+			latestPath = filepath.Join(localPath, e.Name())
+			latestTime = fi.ModTime()
+		}
+	}
+	if latestPath == "" {
+		return "", fmt.Errorf("no file found under download directory: %s", localPath)
+	}
+	return latestPath, nil
 }
 
 // NewMCPListToolsSkill returns a skill that lists all tools from all registered MCP servers.
@@ -270,8 +389,6 @@ func NewMCPSkillsFromEnv(registry *mcp.Registry) []Skill {
 
 	// Add MCP management skills
 	skills = append(skills, NewMCPListServersSkill(registry))
-	skills = append(skills, NewMCPRegisterServerSkill(registry))
-	skills = append(skills, NewMCPUnregisterServerSkill(registry))
 	skills = append(skills, NewMCPCallToolSkill(registry))
 	skills = append(skills, NewMCPListToolsSkill(registry))
 
