@@ -49,15 +49,9 @@ func NewPRPreviewSkill() Skill {
 			}
 
 			// Extract ops (optional)
-			var ops []json.RawMessage
-			if rawOps, ok := input["ops"].([]any); ok {
-				for _, op := range rawOps {
-					if opBytes, ok := op.([]byte); ok {
-						ops = append(ops, json.RawMessage(opBytes))
-					} else if opJSON, ok := op.(json.RawMessage); ok {
-						ops = append(ops, opJSON)
-					}
-				}
+			ops, err := extractOps(input)
+			if err != nil {
+				return nil, &InvokeError{Code: "INVALID_INPUT", Message: "invalid ops: " + err.Error(), Retryable: false}
 			}
 
 			// Build request to pr-server
@@ -134,15 +128,9 @@ func NewPRSubmitSkill() Skill {
 			}
 
 			// Extract ops (optional)
-			var ops []json.RawMessage
-			if rawOps, ok := input["ops"].([]any); ok {
-				for _, op := range rawOps {
-					if opBytes, ok := op.([]byte); ok {
-						ops = append(ops, json.RawMessage(opBytes))
-					} else if opJSON, ok := op.(json.RawMessage); ok {
-						ops = append(ops, opJSON)
-					}
-				}
+			ops, err := extractOps(input)
+			if err != nil {
+				return nil, &InvokeError{Code: "INVALID_INPUT", Message: "invalid ops: " + err.Error(), Retryable: false}
 			}
 
 			// Build request to pr-server
@@ -331,4 +319,44 @@ func isRetryable(code string) bool {
 	}
 	// Default: assume retryable for unknown errors
 	return true
+}
+
+func extractOps(input map[string]any) ([]json.RawMessage, error) {
+	rawOps, exists := input["ops"]
+	if !exists || rawOps == nil {
+		return nil, nil
+	}
+
+	if direct, ok := rawOps.([]json.RawMessage); ok {
+		return direct, nil
+	}
+
+	opsAny, ok := rawOps.([]any)
+	if !ok {
+		return nil, fmt.Errorf("ops must be an array")
+	}
+
+	ops := make([]json.RawMessage, 0, len(opsAny))
+	for i, op := range opsAny {
+		switch v := op.(type) {
+		case []byte:
+			ops = append(ops, json.RawMessage(v))
+		case json.RawMessage:
+			ops = append(ops, v)
+		case map[string]any:
+			b, err := json.Marshal(v)
+			if err != nil {
+				return nil, fmt.Errorf("ops[%d] marshal failed: %w", i, err)
+			}
+			ops = append(ops, json.RawMessage(b))
+		default:
+			b, err := json.Marshal(v)
+			if err != nil {
+				return nil, fmt.Errorf("ops[%d] unsupported type: %T", i, op)
+			}
+			ops = append(ops, json.RawMessage(b))
+		}
+	}
+
+	return ops, nil
 }

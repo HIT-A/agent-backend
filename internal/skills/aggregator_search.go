@@ -2,6 +2,7 @@ package skills
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -255,8 +256,80 @@ func unifiedSearchRAG(ctx context.Context, query string, topK int) ([]SearchResu
 }
 
 func unifiedSearchBrave(ctx context.Context, query string, topK int) ([]SearchResult, error) {
-	// TODO: Call Brave Search MCP
-	return []SearchResult{}, nil
+	registry := GetMCPRegistry()
+	if registry == nil {
+		return nil, fmt.Errorf("mcp registry not initialized")
+	}
+
+	server, exists := registry.Get("brave-search")
+	if !exists {
+		return nil, fmt.Errorf("brave-search MCP server not found")
+	}
+	if !server.Initialized {
+		return nil, fmt.Errorf("brave-search MCP server not initialized")
+	}
+
+	toolResult, err := callMCPTool(ctx, server, "brave_web_search", map[string]any{
+		"query": query,
+		"count": topK,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("brave_web_search: %w", err)
+	}
+
+	type braveItem struct {
+		Title       string `json:"title"`
+		URL         string `json:"url"`
+		Description string `json:"description"`
+	}
+	type bravePayload struct {
+		Results []braveItem `json:"results"`
+	}
+
+	parsed := bravePayload{}
+	if content, ok := toolResult["content"].([]any); ok && len(content) > 0 {
+		if first, ok := content[0].(map[string]any); ok {
+			if text, ok := first["text"].(string); ok && strings.TrimSpace(text) != "" {
+				_ = json.Unmarshal([]byte(text), &parsed)
+			}
+		}
+	}
+	if len(parsed.Results) == 0 {
+		if direct, ok := toolResult["results"].([]any); ok {
+			for _, d := range direct {
+				if m, ok := d.(map[string]any); ok {
+					item := braveItem{}
+					if v, ok := m["title"].(string); ok {
+						item.Title = v
+					}
+					if v, ok := m["url"].(string); ok {
+						item.URL = v
+					}
+					if v, ok := m["description"].(string); ok {
+						item.Description = v
+					}
+					parsed.Results = append(parsed.Results, item)
+				}
+			}
+		}
+	}
+
+	results := make([]SearchResult, 0, len(parsed.Results))
+	for _, it := range parsed.Results {
+		if strings.TrimSpace(it.Title) == "" && strings.TrimSpace(it.URL) == "" {
+			continue
+		}
+		results = append(results, SearchResult{
+			Source:     "brave",
+			SourceType: "web",
+			Title:      it.Title,
+			Content:    it.Description,
+			URL:        it.URL,
+			Score:      0.7,
+		})
+	}
+
+	return results, nil
 }
 
 func unifiedSearchAnnas(ctx context.Context, query string, topK int) ([]SearchResult, error) {
@@ -301,20 +374,30 @@ func unifiedSearchCOS(ctx context.Context, query string, topK int) ([]SearchResu
 }
 
 func unifiedSearchCourse(ctx context.Context, query string, topK int) ([]SearchResult, error) {
-	// 调用 courses.search skill
+	// 调用 courses.search skill（网络抖动导致EOF时重试一次）
 	skill := NewCoursesSearchSkill()
-	result, err := skill.Invoke(ctx, map[string]any{
+	invokeInput := map[string]any{
 		"keyword": query,
 		"limit":   topK,
-	}, nil)
+	}
+
+	result, err := skill.Invoke(ctx, invokeInput, nil)
 	if err != nil {
-		return nil, fmt.Errorf("courses.search: %w", err)
+		if strings.Contains(strings.ToLower(err.Error()), "eof") {
+			time.Sleep(120 * time.Millisecond)
+			result, err = skill.Invoke(ctx, invokeInput, nil)
+		}
+		if err != nil {
+			// 聚合搜索里course源失败时降级为空，避免拖垮整体检索体验。
+			return []SearchResult{}, nil
+		}
 	}
 
 	data, ok := result["output"].(map[string]any)
 	if !ok {
 		return []SearchResult{}, nil
 	}
+	data = unwrapSkillOutput(data)
 
 	results := make([]SearchResult, 0)
 	if resultsData, ok := data["data"].(map[string]any); ok {
@@ -363,24 +446,28 @@ func unifiedSearchCourseRead(ctx context.Context, query string, topK int) ([]Sea
 	if !ok {
 		return []SearchResult{}, nil
 	}
+	data = unwrapSkillOutput(data)
 
 	results := make([]SearchResult, 0)
 	if courseData, ok := data["data"].(map[string]any); ok {
 		if resultData, ok := courseData["result"].(map[string]any); ok {
 			readmeMD, _ := resultData["readme_md"].(string)
 			tomlContent, _ := resultData["readme_toml"].(string)
+			baseData, _ := courseData["base"].(map[string]any)
+			repo, _ := baseData["repo"].(string)
+			org, _ := baseData["org"].(string)
 
 			results = append(results, SearchResult{
 				Source:     "course_read",
 				SourceType: "course",
 				Title:      fmt.Sprintf("课程 %s README", courseCode),
 				Content:    readmeMD,
-				URL:        fmt.Sprintf("https://github.com/%s/%s", courseData["org"], courseData["repo"]),
+				URL:        fmt.Sprintf("https://github.com/%s/%s", org, repo),
 				Score:      1.0,
 				Metadata: map[string]any{
 					"toml":   tomlContent,
-					"campus": courseData["campus"],
-					"repo":   courseData["repo"],
+					"repo":   repo,
+					"org":    org,
 				},
 			})
 		}
@@ -473,4 +560,16 @@ func truncateStr(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+func unwrapSkillOutput(data map[string]any) map[string]any {
+	current := data
+	for i := 0; i < 3; i++ {
+		next, ok := current["output"].(map[string]any)
+		if !ok {
+			break
+		}
+		current = next
+	}
+	return current
 }

@@ -15,6 +15,7 @@ type CourseReadInput struct {
 	CourseCode string `json:"course_code"`
 	Repo       string `json:"repo,omitempty"`
 	Org        string `json:"org,omitempty"`
+	IncludeTOML bool   `json:"include_toml,omitempty"`
 }
 
 // CourseSearchInput 搜索课程输入
@@ -52,6 +53,9 @@ func NewCourseReadSkill() Skill {
 					"campus":      in.Campus,
 					"course_code": in.CourseCode,
 				},
+			}
+			if includeTOML, ok := input["include_toml"].(bool); ok {
+				reqBody["include_toml"] = includeTOML
 			}
 
 			reqJSON, _ := json.Marshal(reqBody)
@@ -114,6 +118,7 @@ func NewCoursesSearchSkill() Skill {
 
 			reqBody := map[string]any{
 				"keyword": in.Keyword,
+				"limit":   in.Limit,
 			}
 			if in.Campus != "" {
 				reqBody["campus"] = in.Campus
@@ -171,6 +176,9 @@ func parseCourseReadInput(input map[string]any) CourseReadInput {
 	}
 	if org, ok := input["org"].(string); ok {
 		in.Org = org
+	}
+	if includeTOML, ok := input["include_toml"].(bool); ok {
+		in.IncludeTOML = includeTOML
 	}
 
 	return in
