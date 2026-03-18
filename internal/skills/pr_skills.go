@@ -25,6 +25,12 @@ type PRPreviewJobInput struct {
 	Ops        []json.RawMessage `json:"ops"`
 }
 
+var multiProjectOps = map[string]bool{
+	"append_course_review":       true,
+	"add_course_teacher_review":  true,
+	"append_course_section_item": true,
+}
+
 // NewPRPreviewSkill registers pr.preview skill.
 //
 // This skill previews course material changes by calling pr-server /v1/course:preview.
@@ -52,6 +58,10 @@ func NewPRPreviewSkill() Skill {
 			ops, err := extractOps(input)
 			if err != nil {
 				return nil, &InvokeError{Code: "INVALID_INPUT", Message: "invalid ops: " + err.Error(), Retryable: false}
+			}
+			ops, err = normalizeAndValidatePROps(campus, ops)
+			if err != nil {
+				return nil, err
 			}
 
 			// Build request to pr-server
@@ -131,6 +141,10 @@ func NewPRSubmitSkill() Skill {
 			ops, err := extractOps(input)
 			if err != nil {
 				return nil, &InvokeError{Code: "INVALID_INPUT", Message: "invalid ops: " + err.Error(), Retryable: false}
+			}
+			ops, err = normalizeAndValidatePROps(campus, ops)
+			if err != nil {
+				return nil, err
 			}
 
 			// Build request to pr-server
@@ -359,4 +373,127 @@ func extractOps(input map[string]any) ([]json.RawMessage, error) {
 	}
 
 	return ops, nil
+}
+
+func normalizeAndValidatePROps(campus string, ops []json.RawMessage) ([]json.RawMessage, error) {
+	normalizedCampus := strings.ToLower(strings.TrimSpace(campus))
+	if len(ops) == 0 {
+		return ops, nil
+	}
+
+	out := make([]json.RawMessage, 0, len(ops))
+	for i, raw := range ops {
+		var opObj map[string]any
+		if err := json.Unmarshal(raw, &opObj); err != nil {
+			return nil, &InvokeError{Code: "INVALID_INPUT", Message: fmt.Sprintf("ops[%d] is not a valid JSON object", i), Retryable: false}
+		}
+
+		opName, _ := opObj["op"].(string)
+		opName = strings.TrimSpace(opName)
+		if opName == "" {
+			return nil, &InvokeError{Code: "INVALID_INPUT", Message: fmt.Sprintf("ops[%d].op is required", i), Retryable: false}
+		}
+
+		rewritten := rewritePROp(opName, opObj)
+		rewrittenOp, _ := rewritten["op"].(string)
+		if (normalizedCampus == "harbin" || normalizedCampus == "weihai") && multiProjectOps[rewrittenOp] {
+			return nil, &InvokeError{Code: "INVALID_OPS", Message: fmt.Sprintf("campus %s only supports normal ops", normalizedCampus), Retryable: false}
+		}
+
+		b, err := json.Marshal(rewritten)
+		if err != nil {
+			return nil, &InvokeError{Code: "INVALID_INPUT", Message: fmt.Sprintf("ops[%d] marshal failed: %v", i, err), Retryable: false}
+		}
+		out = append(out, json.RawMessage(b))
+	}
+
+	return out, nil
+}
+
+func rewritePROp(opName string, op map[string]any) map[string]any {
+	if opName == "append_course_review" {
+		if hasNonEmptyString(op, "teacher_name") {
+			return map[string]any{
+				"op":           "add_course_teacher_review",
+				"course_name":  op["course_name"],
+				"teacher_name": strings.TrimSpace(asString(op["teacher_name"])),
+				"content":      firstNonEmptyString(asString(op["content"]), nestedString(op, "item", "content")),
+				"author":       firstNonNil(op["author"], nestedMap(op, "item", "author")),
+			}
+		}
+
+		sectionTitle := firstNonEmptyString(asString(op["section_title"]), "课程评价")
+		return map[string]any{
+			"op":            "append_course_section_item",
+			"course_name":   op["course_name"],
+			"section_title": sectionTitle,
+			"item": map[string]any{
+				"content": firstNonEmptyString(asString(op["content"]), nestedString(op, "item", "content")),
+				"author":  firstNonNil(op["author"], nestedMap(op, "item", "author")),
+			},
+		}
+	}
+
+	if opName == "append_course_section_item" && hasNonEmptyString(op, "teacher_name") {
+		return map[string]any{
+			"op":           "add_course_teacher_review",
+			"course_name":  op["course_name"],
+			"teacher_name": strings.TrimSpace(asString(op["teacher_name"])),
+			"content":      firstNonEmptyString(asString(op["content"]), nestedString(op, "item", "content")),
+			"author":       firstNonNil(op["author"], nestedMap(op, "item", "author")),
+		}
+	}
+
+	return op
+}
+
+func hasNonEmptyString(m map[string]any, key string) bool {
+	v, ok := m[key]
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(asString(v)) != ""
+}
+
+func asString(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func nestedMap(m map[string]any, key1, key2 string) map[string]any {
+	v1, ok := m[key1].(map[string]any)
+	if !ok {
+		return nil
+	}
+	v2, ok := v1[key2].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return v2
+}
+
+func nestedString(m map[string]any, key1, key2 string) string {
+	v1, ok := m[key1].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return asString(v1[key2])
+}
+
+func firstNonNil(values ...any) any {
+	for _, v := range values {
+		if v != nil {
+			return v
+		}
+	}
+	return nil
 }

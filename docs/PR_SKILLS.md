@@ -8,6 +8,13 @@ Three PR (Pull Request) skills have been implemented in `hoa-agent-backend` to i
 - `pr.submit` - Submit course material changes via PR
 - `pr.lookup` - Query PR status
 
+2026-03-18 alignment:
+- `append_course_review` has been removed and is no longer generated/forwarded.
+- Generic sub-course review is normalized to `append_course_section_item`.
+- Teacher review is normalized to `add_course_teacher_review`.
+- For `harbin`/`weihai`, multi-project ops are blocked with `INVALID_OPS`.
+- Existing normal ops remain unchanged.
+
 ## Architecture
 
 ```
@@ -17,12 +24,25 @@ POST /v1/skills/pr.preview:invoke
       ↓
 hoa-agent-backend
       ↓
-HTTP → pr-server (localhost:8080)
+HTTP → pr-server (PR_SERVER_URL)
       ↓
 GitHub API → GitHub
 ```
 
 ## Skills
+
+### Multi-Project Operation Routing
+
+Before forwarding to pr-server, `pr.preview` and `pr.submit` apply an ops normalization layer:
+
+- Removed op:
+  - `append_course_review`
+- Rewrites:
+  - generic course review -> `append_course_section_item` (default `section_title` is `课程评价`)
+  - teacher-specific review -> `add_course_teacher_review`
+- Campus guard:
+  - `shenzhen` allows multi-project ops
+  - `harbin`/`weihai` reject multi-project ops with `INVALID_OPS`
 
 ### 1. pr.preview
 
@@ -134,6 +154,8 @@ Query the status of a PR.
 export PR_SERVER_URL=http://pr-server.internal:8080
 ```
 
+In current deployment, pr-server is typically configured via `/etc/agent-backend.env`.
+
 ## Error Handling
 
 PR skills follow SSOT contract semantics:
@@ -191,7 +213,6 @@ go test ./internal/skills -short -v
 
 ## Future Enhancements
 
-- [ ] Async version of pr.submit (for long-running submissions)
 - [ ] PR listing skill
 - [ ] PR merge status monitoring
 - [ ] Batch operations
