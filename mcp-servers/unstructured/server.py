@@ -148,7 +148,7 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         return [TextContent(type="text", text=json.dumps({
             "error": str(e),
             "type": type(e).__name__
-        })]
+        }))]
 
 
 async def convert_single_document(args: Dict[str, Any]) -> Dict[str, Any]:

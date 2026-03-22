@@ -2,7 +2,9 @@ package skills
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"path"
 	"strings"
@@ -95,12 +97,17 @@ func NewDocumentConverterSkill(mcpRegistry *mcp.Registry) Skill {
 			}
 
 			// Call MCP tool
-			result, err := callMCPTool(ctx, server, "convert_to_markdown", map[string]any{
-				"content_base64":    contentBase64,
-				"filename":          filename,
-				"chunking_strategy": input["chunking_strategy"],
-				"max_characters":    input["max_characters"],
-			})
+			args := map[string]any{
+				"content_base64": contentBase64,
+				"filename":       filename,
+			}
+			if cs, ok := input["chunking_strategy"].(string); ok && cs != "" {
+				args["chunking_strategy"] = cs
+			}
+			if mc, ok := input["max_characters"].(float64); ok && mc > 0 {
+				args["max_characters"] = int(mc)
+			}
+			result, err := callMCPTool(ctx, server, "convert_to_markdown", args)
 			if err != nil {
 				return nil, &InvokeError{Code: "INTERNAL", Message: fmt.Sprintf("conversion failed: %v", err), Retryable: true}
 			}
@@ -271,8 +278,8 @@ func executeBatchDownload(ctx context.Context, in GitHubBatchDownloadInput, mcpR
 
 	intakeEnqueued := 0
 	intakeFailed := 0
-	if in.QueueToIntake {
-		intakeEnqueued, intakeFailed = enqueueDownloadedFilesToIntake(ctx, in, allFiles)
+	if in.StoreInCOS {
+		intakeEnqueued, intakeFailed = processDownloadedFilesForIngest(ctx, in, allFiles, cosStorage)
 	}
 
 	return map[string]any{
@@ -288,9 +295,14 @@ func executeBatchDownload(ctx context.Context, in GitHubBatchDownloadInput, mcpR
 	}
 }
 
-func enqueueDownloadedFilesToIntake(ctx context.Context, in GitHubBatchDownloadInput, files []DownloadedFile) (int, int) {
-	enqueued := 0
+func processDownloadedFilesForIngest(ctx context.Context, in GitHubBatchDownloadInput, files []DownloadedFile, cosStorage *cos.Storage) (int, int) {
+	processed := 0
 	failed := 0
+
+	dedupStore, _ := NewDedupStoreFromEnv()
+	if dedupStore != nil {
+		defer dedupStore.Close()
+	}
 
 	for i := range files {
 		if files[i].Error != "" || strings.TrimSpace(files[i].Content) == "" {
@@ -303,22 +315,65 @@ func enqueueDownloadedFilesToIntake(ctx context.Context, in GitHubBatchDownloadI
 			continue
 		}
 
-		sourceTag := "github/" + strings.ReplaceAll(files[i].Repo, "/", "-")
+		contentHash := sha256.Sum256(b)
+		sha256Hex := hex.EncodeToString(contentHash[:])
+
+		// Dedup check
+		if dedupStore != nil {
+			shouldIngest, existing, _ := dedupStore.ShouldIngest(ctx, sha256Hex)
+			if !shouldIngest {
+				files[i].IntakePath = "skipped:" + existing.COSKey
+				processed++
+				continue
+			}
+		}
+
 		name := path.Base(files[i].Path)
 		if name == "" || name == "." || name == "/" {
 			name = "file.bin"
 		}
-		queuedPath, err := enqueueRawToGitHub(ctx, in.TargetRepo, in.TargetBranch, in.IntakeSkillDir, sourceTag, name, b)
-		if err != nil {
-			files[i].IntakeError = err.Error()
-			failed++
-			continue
+
+		// Store in COS
+		var cosKey string
+		if in.StoreInCOS && cosStorage != nil {
+			key := fmt.Sprintf("%s/github/%s/%s", in.COSPrefix, sha256Hex[:12], name)
+			if _, err := cosStorage.SaveFile(ctx, key, b, "application/octet-stream"); err == nil {
+				cosKey = key
+			}
 		}
-		files[i].IntakePath = queuedPath
-		enqueued++
+
+		// Record to dedup store
+		if dedupStore != nil && cosKey != "" {
+			_ = dedupStore.Record(ctx, sha256Hex, cosKey, int64(len(b)))
+		}
+
+		// Direct RAG ingest
+		if in.AutoIngestRAG {
+			qdrant, err := NewQdrantClientFromEnv()
+			if err == nil {
+				embedder, err := NewEmbeddingProviderFromEnv()
+				if err == nil {
+					sourceTag := fmt.Sprintf("github/%s/%s", strings.ReplaceAll(files[i].Repo, "/", "-"), name)
+					ingested, iErr := IngestMarkdownDirect(ctx, b, name, sourceTag, cosStorage, GetMCPRegistry(), qdrant, embedder)
+					if iErr == nil {
+						files[i].IntakePath = fmt.Sprintf("cos:%s rag:%d", cosKey, ingested)
+						processed++
+						continue
+					}
+				}
+			}
+		}
+
+		if cosKey != "" {
+			files[i].IntakePath = "cos:" + cosKey
+			processed++
+		} else {
+			files[i].IntakeError = "cos save failed"
+			failed++
+		}
 	}
 
-	return enqueued, failed
+	return processed, failed
 }
 
 func downloadFromRepo(ctx context.Context, repo string, in GitHubBatchDownloadInput, mcpRegistry *mcp.Registry) []DownloadedFile {

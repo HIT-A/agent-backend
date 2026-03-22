@@ -2,7 +2,9 @@ package skills
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,11 +28,13 @@ type FileUploadTask struct {
 type FileUploadResult struct {
 	Key       string `json:"key"`
 	Success   bool   `json:"success"`
+	Skipped   bool   `json:"skipped,omitempty"`
 	Error     string `json:"error,omitempty"`
 	FileID    string `json:"file_id,omitempty"`
 	Size      int64  `json:"size,omitempty"`
 	URL       string `json:"url,omitempty"`
 	AccessURL string `json:"access_url,omitempty"`
+	RagChunks int64  `json:"rag_chunks,omitempty"`
 }
 
 // NewFilesUploadSkill creates a skill for uploading files to storage with batch support.
@@ -90,19 +94,59 @@ func uploadSingleFile(ctx context.Context, input map[string]any, storage *cos.St
 		return nil, &InvokeError{Code: "INVALID_INPUT", Message: "content_base64, url, or text is required", Retryable: false}
 	}
 
+	// SHA256 deduplication check
+	contentHash := sha256.Sum256(content)
+	sha256Hex := hex.EncodeToString(contentHash[:])
+	dedupStore, err := NewDedupStoreFromEnv()
+	if err == nil {
+		defer dedupStore.Close()
+		shouldIngest, existing, _ := dedupStore.ShouldIngest(ctx, sha256Hex)
+		if !shouldIngest {
+			return map[string]any{
+				"success":       true,
+				"skipped":       true,
+				"duplicate_sha": sha256Hex[:12],
+				"existing_cos":  existing.COSKey,
+				"source":        source,
+			}, nil
+		}
+	}
+
 	result, err := storage.SaveFile(ctx, key, content, contentType)
 	if err != nil {
 		return nil, &InvokeError{Code: "UPLOAD_FAILED", Message: err.Error(), Retryable: true}
 	}
 
-	return map[string]any{
+	resp := map[string]any{
 		"success":    true,
 		"file_id":    result.FileID,
 		"size":       result.Size,
 		"url":        result.URL,
 		"access_url": result.AccessURL,
 		"source":     source,
-	}, nil
+		"sha256":     sha256Hex[:12],
+	}
+
+	// Record to dedup store
+	if dedupStore != nil {
+		_ = dedupStore.Record(ctx, sha256Hex, key, result.Size)
+	}
+
+	// Optional: direct RAG ingest
+	if autoRag, ok := input["auto_ingest_rag"]; ok && autoRag == true {
+		qdrant, err := NewQdrantClientFromEnv()
+		if err == nil {
+			embedder, err := NewEmbeddingProviderFromEnv()
+			if err == nil {
+				ingested, iErr := IngestMarkdownDirect(ctx, content, key, "files/"+key, storage, GetMCPRegistry(), qdrant, embedder)
+				if iErr == nil {
+					resp["rag_chunks"] = ingested
+				}
+			}
+		}
+	}
+
+	return resp, nil
 }
 
 // uploadFilesBatch handles concurrent batch file uploads
@@ -175,7 +219,7 @@ func uploadFilesBatch(ctx context.Context, files []any, storage *cos.Storage) (m
 func processUploadTask(ctx context.Context, file map[string]any, storage *cos.Storage) FileUploadResult {
 	key, _ := file["key"].(string)
 	if key == "" {
-		return FileUploadResult{Success: false, Error: "key is required"}
+		return FileUploadResult{Key: key, Success: false, Error: "key is required"}
 	}
 
 	contentType, _ := file["content_type"].(string)
@@ -203,19 +247,57 @@ func processUploadTask(ctx context.Context, file map[string]any, storage *cos.St
 		return FileUploadResult{Key: key, Success: false, Error: "content_base64, url, or text is required"}
 	}
 
+	contentHash := sha256.Sum256(content)
+	sha256Hex := hex.EncodeToString(contentHash[:])
+
+	// Dedup check
+	dedupStore, _ := NewDedupStoreFromEnv()
+	if dedupStore != nil {
+		defer dedupStore.Close()
+		shouldIngest, existing, _ := dedupStore.ShouldIngest(ctx, sha256Hex)
+		if !shouldIngest {
+			return FileUploadResult{
+				Key:     key,
+				Success: true,
+				Skipped: true,
+				Error:   fmt.Sprintf("duplicate SHA256: %s (COS: %s)", sha256Hex[:12], existing.COSKey),
+			}
+		}
+	}
+
 	result, err := storage.SaveFile(ctx, key, content, contentType)
 	if err != nil {
 		return FileUploadResult{Key: key, Success: false, Error: err.Error()}
 	}
 
-	return FileUploadResult{
-		Key:       key,
-		Success:   true,
-		FileID:    result.FileID,
-		Size:      result.Size,
-		URL:       result.URL,
-		AccessURL: result.AccessURL,
+	resp := FileUploadResult{
+		Key:     key,
+		Success: true,
+		FileID:  result.FileID,
+		Size:    result.Size,
+		URL:     result.URL,
 	}
+
+	// Record to dedup store
+	if dedupStore != nil {
+		_ = dedupStore.Record(ctx, sha256Hex, key, result.Size)
+	}
+
+	// Optional: direct RAG ingest
+	if autoRag, ok := file["auto_ingest_rag"]; ok && autoRag == true {
+		qdrant, err := NewQdrantClientFromEnv()
+		if err == nil {
+			embedder, err := NewEmbeddingProviderFromEnv()
+			if err == nil {
+				ingested, iErr := IngestMarkdownDirect(ctx, content, key, "files/"+key, storage, GetMCPRegistry(), qdrant, embedder)
+				if iErr == nil {
+					resp.RagChunks = int64(ingested)
+				}
+			}
+		}
+	}
+
+	return resp
 }
 
 // NewFilesDownloadSkill creates a skill for downloading files from storage.

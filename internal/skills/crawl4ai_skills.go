@@ -2,6 +2,8 @@ package skills
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -14,15 +16,14 @@ import (
 
 // CrawlPageInput represents input for crawling a single page
 type CrawlPageInput struct {
-	URL            string   `json:"url"`
-	WaitFor        string   `json:"wait_for,omitempty"`
-	ExcludePaths   []string `json:"exclude_paths,omitempty"`
-	ContentFilter  bool     `json:"content_filter"`
-	OutputFormat   string   `json:"output_format"`
-	QueueToIntake  bool     `json:"queue_to_intake"`
-	IntakeRepo     string   `json:"intake_repo"`
-	IntakeBranch   string   `json:"intake_branch"`
-	IntakeSkillDir string   `json:"intake_skill_dir"`
+	URL           string   `json:"url"`
+	WaitFor       string   `json:"wait_for,omitempty"`
+	ExcludePaths  []string `json:"exclude_paths,omitempty"`
+	ContentFilter bool     `json:"content_filter"`
+	OutputFormat  string   `json:"output_format"`
+	StoreInCOS    bool     `json:"store_in_cos"`
+	COSPrefix     string   `json:"cos_prefix"`
+	AutoIngestRAG bool     `json:"auto_ingest_rag"`
 }
 
 // CrawlSiteInput represents input for full site crawling
@@ -88,20 +89,63 @@ func NewCrawl4AIPageSkill(mcpRegistry *mcp.Registry) Skill {
 				return nil, &InvokeError{Code: "INTERNAL", Message: fmt.Sprintf("crawl failed: %v", err), Retryable: true}
 			}
 
-			if in.QueueToIntake {
-				fileName, body := buildCrawlRawSnapshot(in.URL, result)
-				queuedPath, qErr := enqueueRawToGitHub(ctx, in.IntakeRepo, in.IntakeBranch, in.IntakeSkillDir, "crawl4ai", fileName, body)
-				intakeMeta := map[string]any{
-					"enabled": in.QueueToIntake,
+			// Extract markdown content for storage/RAG
+			fileName, body := buildCrawlRawSnapshot(in.URL, result)
+			if len(body) == 0 {
+				return result, nil
+			}
+
+			contentHash := sha256.Sum256(body)
+			sha256Hex := hex.EncodeToString(contentHash[:])
+
+			// Dedup check
+			dedupStore, _ := NewDedupStoreFromEnv()
+			if dedupStore != nil {
+				shouldIngest, existing, _ := dedupStore.ShouldIngest(ctx, sha256Hex)
+				result["dedup"] = map[string]any{
+					"sha256": sha256Hex[:12],
 				}
-				if qErr != nil {
-					intakeMeta["queued"] = false
-					intakeMeta["error"] = qErr.Error()
-				} else {
-					intakeMeta["queued"] = true
-					intakeMeta["path"] = queuedPath
+				if !shouldIngest {
+					result["dedup"].(map[string]any)["skipped"] = true
+					result["dedup"].(map[string]any)["existing_cos"] = existing.COSKey
+					dedupStore.Close()
+					return result, nil
 				}
-				result["intake"] = intakeMeta
+				_ = dedupStore.Close()
+			}
+
+			// Store in COS
+			cosStorage := GetCOSStorage()
+			var cosKey string
+			if in.StoreInCOS && cosStorage != nil {
+				key := fmt.Sprintf("%s/crawl/%s", in.COSPrefix, sha256Hex[:12]+"_"+fileName)
+				if _, err := cosStorage.SaveFile(ctx, key, body, "text/markdown"); err == nil {
+					cosKey = key
+					result["cos"] = map[string]any{"key": cosKey}
+				}
+			}
+
+			// Record to dedup store
+			if dedupStore != nil && cosKey != "" {
+				dedupStore2, _ := NewDedupStoreFromEnv()
+				if dedupStore2 != nil {
+					_ = dedupStore2.Record(ctx, sha256Hex, cosKey, int64(len(body)))
+					dedupStore2.Close()
+				}
+			}
+
+			// Direct RAG ingest
+			if in.AutoIngestRAG && len(body) > 0 {
+				qdrant, err := NewQdrantClientFromEnv()
+				if err == nil {
+					embedder, err := NewEmbeddingProviderFromEnv()
+					if err == nil {
+						ingested, iErr := IngestMarkdownDirect(ctx, body, fileName, "crawl4ai/"+fileName, cosStorage, GetMCPRegistry(), qdrant, embedder)
+						if iErr == nil {
+							result["rag"] = map[string]any{"chunks": ingested}
+						}
+					}
+				}
 			}
 
 			return result, nil
@@ -215,12 +259,11 @@ func NewCrawl4AIStatusSkill(mcpRegistry *mcp.Registry) Skill {
 // parseCrawlPageInput parses and validates crawl page input
 func parseCrawlPageInput(input map[string]any) CrawlPageInput {
 	in := CrawlPageInput{
-		ContentFilter:  true,
-		OutputFormat:   "markdown",
-		QueueToIntake:  true,
-		IntakeRepo:     "HIT-A/HITA_RagData",
-		IntakeBranch:   "main",
-		IntakeSkillDir: defaultSkillRawDir,
+		ContentFilter: true,
+		OutputFormat:  "markdown",
+		StoreInCOS:    true,
+		COSPrefix:     "crawls",
+		AutoIngestRAG: true,
 	}
 
 	if url, ok := input["url"].(string); ok {
@@ -236,16 +279,16 @@ func parseCrawlPageInput(input map[string]any) CrawlPageInput {
 		in.OutputFormat = outputFormat
 	}
 	if v, ok := input["queue_to_intake"].(bool); ok {
-		in.QueueToIntake = v
+		in.AutoIngestRAG = v
 	}
-	if v, ok := input["intake_repo"].(string); ok && strings.TrimSpace(v) != "" {
-		in.IntakeRepo = strings.TrimSpace(v)
+	if v, ok := input["store_in_cos"].(bool); ok {
+		in.StoreInCOS = v
 	}
-	if v, ok := input["intake_branch"].(string); ok && strings.TrimSpace(v) != "" {
-		in.IntakeBranch = strings.TrimSpace(v)
+	if v, ok := input["cos_prefix"].(string); ok {
+		in.COSPrefix = v
 	}
-	if v, ok := input["intake_skill_dir"].(string); ok && strings.TrimSpace(v) != "" {
-		in.IntakeSkillDir = strings.Trim(strings.TrimSpace(v), "/")
+	if v, ok := input["auto_ingest_rag"].(bool); ok {
+		in.AutoIngestRAG = v
 	}
 	if excludePaths, ok := input["exclude_paths"].([]any); ok {
 		for _, path := range excludePaths {

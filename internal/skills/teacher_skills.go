@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+
+	"github.com/mozillazg/go-pinyin"
 
 	"hoa-agent-backend/internal/mcp"
 )
@@ -298,10 +301,25 @@ func extractOffice(text string) string {
 	return ""
 }
 
-// Simple pinyin conversion (basic version)
-// In production, use a proper pinyin library
+// convertToPinyin converts Chinese characters to pinyin
+// Uses mozillazg/go-pinyin library for accurate conversion
 func convertToPinyin(name string) string {
-	// This is a placeholder - in production, use a proper library
-	// For now, just return lowercase name
-	return strings.ToLower(name)
+	// If no Chinese characters, return lowercase
+	hasChinese := false
+	for _, r := range name {
+		if unicode.Is(unicode.Han, r) {
+			hasChinese = true
+			break
+		}
+	}
+	if !hasChinese {
+		return strings.ToLower(name)
+	}
+
+	// Convert Chinese to pinyin using Slug format (e.g., "zhang-san")
+	opts := pinyin.NewArgs()
+	opts.Style = pinyin.Normal
+	opts.Separator = "-"
+
+	return pinyin.Slug(name, opts)
 }

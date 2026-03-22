@@ -2,6 +2,8 @@ package skills
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -151,6 +153,10 @@ func maybeQueueTransitOutput(ctx context.Context, serverName, toolName string, a
 		return nil
 	}
 
+	var b []byte
+	var filename string
+	var sourceInfo string
+
 	localFilePath := firstLocalPath(result)
 	if localFilePath != "" {
 		resolvedPath, resolveErr := resolveDownloadedPath(localFilePath, arguments)
@@ -164,7 +170,8 @@ func maybeQueueTransitOutput(ctx context.Context, serverName, toolName string, a
 		}
 		localFilePath = resolvedPath
 
-		b, err := os.ReadFile(localFilePath)
+		var err error
+		b, err = os.ReadFile(localFilePath)
 		if err != nil {
 			return map[string]any{
 				"mode":        "transit_with_intake",
@@ -182,74 +189,102 @@ func maybeQueueTransitOutput(ctx context.Context, serverName, toolName string, a
 			}
 		}
 
-		filename := path.Base(localFilePath)
+		filename = path.Base(localFilePath)
 		if strings.TrimSpace(filename) == "" {
 			filename = "annas-download.bin"
 		}
-		queuedPath, qErr := enqueueRawToGitHub(ctx, "HIT-A/HITA_RagData", "main", defaultSkillRawDir, "annas", filename, b)
-		if qErr != nil {
+		sourceInfo = "local_file:" + localFilePath
+		_ = os.Remove(localFilePath)
+	} else {
+		downloadURL := firstTransitURL(result)
+		if downloadURL == "" {
 			return map[string]any{
-				"mode":        "transit_with_intake",
-				"persisted":   false,
-				"source_path": localFilePath,
-				"reason":      qErr.Error(),
+				"mode":      "transit_with_intake",
+				"persisted": false,
+				"reason":    "no download url found in annas result",
 			}
 		}
 
-		_ = os.Remove(localFilePath)
-		return map[string]any{
-			"mode":        "transit_with_intake",
-			"persisted":   true,
-			"source_path": localFilePath,
-			"size":        len(b),
-			"path":        queuedPath,
+		var err error
+		b, err = downloadFromURL(ctx, downloadURL)
+		if err != nil {
+			return map[string]any{
+				"mode":       "transit_with_intake",
+				"persisted":  false,
+				"source_url": downloadURL,
+				"reason":     "download failed: " + err.Error(),
+			}
+		}
+		if len(b) > 25*1024*1024 {
+			return map[string]any{
+				"mode":       "transit_with_intake",
+				"persisted":  false,
+				"source_url": downloadURL,
+				"reason":     "file too large for intake (>25MB)",
+			}
+		}
+
+		filename = guessTransitFilename(arguments, downloadURL)
+		sourceInfo = "url:" + downloadURL
+	}
+
+	// SHA256 dedup check
+	contentHash := sha256.Sum256(b)
+	sha256Hex := hex.EncodeToString(contentHash[:])
+
+	dedupStore, _ := NewDedupStoreFromEnv()
+	if dedupStore != nil {
+		shouldIngest, existing, _ := dedupStore.ShouldIngest(ctx, sha256Hex)
+		if !shouldIngest {
+			dedupStore.Close()
+			return map[string]any{
+				"mode":          "transit_with_intake",
+				"persisted":     true,
+				"skipped":       true,
+				"duplicate_sha": sha256Hex[:12],
+				"existing_cos":  existing.COSKey,
+				"source":        sourceInfo,
+			}
 		}
 	}
 
-	downloadURL := firstTransitURL(result)
-	if downloadURL == "" {
-		return map[string]any{
-			"mode":      "transit_with_intake",
-			"persisted": false,
-			"reason":    "no download url found in annas result",
+	// Store in COS
+	cosStorage := GetCOSStorage()
+	var cosKey string
+	if cosStorage != nil {
+		key := fmt.Sprintf("annas/%s/%s", sha256Hex[:12], filename)
+		if _, err := cosStorage.SaveFile(ctx, key, b, "application/octet-stream"); err == nil {
+			cosKey = key
 		}
 	}
 
-	b, err := downloadFromURL(ctx, downloadURL)
-	if err != nil {
-		return map[string]any{
-			"mode":       "transit_with_intake",
-			"persisted":  false,
-			"source_url": downloadURL,
-			"reason":     "download failed: " + err.Error(),
-		}
-	}
-	if len(b) > 25*1024*1024 {
-		return map[string]any{
-			"mode":       "transit_with_intake",
-			"persisted":  false,
-			"source_url": downloadURL,
-			"reason":     "file too large for intake (>25MB)",
-		}
+	// Record to dedup store
+	if dedupStore != nil && cosKey != "" {
+		dedupStore.Record(ctx, sha256Hex, cosKey, int64(len(b)))
+		dedupStore.Close()
 	}
 
-	filename := guessTransitFilename(arguments, downloadURL)
-	queuedPath, qErr := enqueueRawToGitHub(ctx, "HIT-A/HITA_RagData", "main", defaultSkillRawDir, "annas", filename, b)
-	if qErr != nil {
-		return map[string]any{
-			"mode":       "transit_with_intake",
-			"persisted":  false,
-			"source_url": downloadURL,
-			"reason":     qErr.Error(),
+	// Direct RAG ingest
+	qdrant, err := NewQdrantClientFromEnv()
+	var ragChunks int
+	if err == nil {
+		embedder, err := NewEmbeddingProviderFromEnv()
+		if err == nil {
+			ingested, iErr := IngestMarkdownDirect(ctx, b, filename, "annas/"+filename, cosStorage, GetMCPRegistry(), qdrant, embedder)
+			if iErr == nil {
+				ragChunks = ingested
+			}
 		}
 	}
 
 	return map[string]any{
 		"mode":       "transit_with_intake",
 		"persisted":  true,
-		"source_url": downloadURL,
+		"source":     sourceInfo,
 		"size":       len(b),
-		"path":       queuedPath,
+		"sha256":     sha256Hex[:12],
+		"cos_key":    cosKey,
+		"rag_chunks": ragChunks,
 	}
 }
 

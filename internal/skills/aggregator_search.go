@@ -282,69 +282,350 @@ func unifiedSearchBrave(ctx context.Context, query string, topK int) ([]SearchRe
 		URL         string `json:"url"`
 		Description string `json:"description"`
 	}
-	type bravePayload struct {
-		Results []braveItem `json:"results"`
-	}
 
-	parsed := bravePayload{}
+	results := make([]SearchResult, 0)
+
+	// Try parsing from text content (MCP returns JSON in content field)
 	if content, ok := toolResult["content"].([]any); ok && len(content) > 0 {
 		if first, ok := content[0].(map[string]any); ok {
 			if text, ok := first["text"].(string); ok && strings.TrimSpace(text) != "" {
-				_ = json.Unmarshal([]byte(text), &parsed)
-			}
-		}
-	}
-	if len(parsed.Results) == 0 {
-		if direct, ok := toolResult["results"].([]any); ok {
-			for _, d := range direct {
-				if m, ok := d.(map[string]any); ok {
-					item := braveItem{}
-					if v, ok := m["title"].(string); ok {
-						item.Title = v
+				var payload struct {
+					Results []braveItem `json:"results"`
+				}
+				if err := json.Unmarshal([]byte(text), &payload); err == nil {
+					for _, item := range payload.Results {
+						if strings.TrimSpace(item.Title) == "" && strings.TrimSpace(item.URL) == "" {
+							continue
+						}
+						results = append(results, SearchResult{
+							Source:     "brave",
+							SourceType: "web",
+							Title:      item.Title,
+							Content:    item.Description,
+							URL:        item.URL,
+							Score:      0.7,
+						})
 					}
-					if v, ok := m["url"].(string); ok {
-						item.URL = v
-					}
-					if v, ok := m["description"].(string); ok {
-						item.Description = v
-					}
-					parsed.Results = append(parsed.Results, item)
+					return results, nil
 				}
 			}
 		}
 	}
 
-	results := make([]SearchResult, 0, len(parsed.Results))
-	for _, it := range parsed.Results {
-		if strings.TrimSpace(it.Title) == "" && strings.TrimSpace(it.URL) == "" {
-			continue
+	// Fallback: try parsing from direct results field
+	if rawResults, ok := toolResult["results"].([]any); ok {
+		for _, d := range rawResults {
+			if m, ok := d.(map[string]any); ok {
+				item := braveItem{}
+				if v, ok := m["title"].(string); ok {
+					item.Title = v
+				}
+				if v, ok := m["url"].(string); ok {
+					item.URL = v
+				}
+				if v, ok := m["description"].(string); ok {
+					item.Description = v
+				}
+				if strings.TrimSpace(item.Title) == "" && strings.TrimSpace(item.URL) == "" {
+					continue
+				}
+				results = append(results, SearchResult{
+					Source:     "brave",
+					SourceType: "web",
+					Title:      item.Title,
+					Content:    item.Description,
+					URL:        item.URL,
+					Score:      0.7,
+				})
+			}
 		}
-		results = append(results, SearchResult{
-			Source:     "brave",
-			SourceType: "web",
-			Title:      it.Title,
-			Content:    it.Description,
-			URL:        it.URL,
-			Score:      0.7,
-		})
 	}
 
 	return results, nil
 }
 
 func unifiedSearchAnnas(ctx context.Context, query string, topK int) ([]SearchResult, error) {
-	// TODO: Call Annas Archive MCP
-	return []SearchResult{}, nil
+	registry := GetMCPRegistry()
+	if registry == nil {
+		return nil, fmt.Errorf("mcp registry not initialized")
+	}
+
+	server, exists := registry.Get("annas-archive")
+	if !exists {
+		return nil, fmt.Errorf("annas-archive MCP server not found")
+	}
+	if !server.Initialized {
+		return nil, fmt.Errorf("annas-archive MCP server not initialized")
+	}
+
+	// Anna's Archive has two search tools: book_search and article_search
+	// Try article_search first (for DOI or academic papers)
+	results := make([]SearchResult, 0)
+	for _, tool := range server.Tools {
+		if tool.Name == "article_search" {
+			toolResult, err := callMCPTool(ctx, server, "article_search", map[string]any{
+				"query": query,
+			})
+			if err == nil {
+				results = parseAnnasTextResults(toolResult, "article", topK)
+			}
+			break
+		}
+	}
+
+	// If no results from article_search, try book_search
+	if len(results) == 0 {
+		for _, tool := range server.Tools {
+			if tool.Name == "book_search" {
+				toolResult, err := callMCPTool(ctx, server, "book_search", map[string]any{
+					"query": query,
+				})
+				if err == nil {
+					results = parseAnnasTextResults(toolResult, "book", topK)
+				}
+				break
+			}
+		}
+	}
+
+	return results, nil
+}
+
+func parseAnnasTextResults(toolResult map[string]any, sourceType string, topK int) []SearchResult {
+	results := make([]SearchResult, 0)
+
+	var text string
+
+	// Handle MCP result that has content array with text
+	if content, ok := toolResult["content"].([]any); ok && len(content) > 0 {
+		if first, ok := content[0].(map[string]any); ok {
+			if t, ok := first["text"].(string); ok && strings.TrimSpace(t) != "" {
+				text = t
+			}
+		}
+	}
+
+	// Fallback: Handle raw_result (when JSON parsing failed)
+	if text == "" {
+		if raw, ok := toolResult["raw_result"].(string); ok && strings.TrimSpace(raw) != "" {
+			text = raw
+		}
+	}
+
+	if text != "" {
+		entries := strings.Split(text, "\n\n")
+		for i, entry := range entries {
+			if i >= topK {
+				break
+			}
+			if strings.TrimSpace(entry) == "" || strings.HasPrefix(entry, "No ") {
+				continue
+			}
+
+			result := parseAnnasEntry(entry, sourceType)
+			if result.Title != "" {
+				results = append(results, result)
+			}
+		}
+	}
+
+	return results
+}
+
+func parseAnnasEntry(entry string, sourceType string) SearchResult {
+	result := SearchResult{
+		Source:     "annas",
+		SourceType: sourceType,
+		Score:      0.8,
+	}
+
+	lines := strings.Split(entry, "\n")
+	for _, line := range lines {
+		if idx := strings.Index(line, ":"); idx > 0 {
+			key := strings.TrimSpace(line[:idx])
+			value := strings.TrimSpace(line[idx+1:])
+
+			switch strings.ToLower(key) {
+			case "title":
+				result.Title = value
+			case "authors":
+				result.Content = "Authors: " + value + "\n"
+			case "publisher":
+				result.Content += "Publisher: " + value + "\n"
+			case "language":
+				result.Content += "Language: " + value + "\n"
+			case "format":
+				result.Content += "Format: " + value + "\n"
+			case "size":
+				result.Content += "Size: " + value + "\n"
+			case "url":
+				result.URL = value
+			case "hash":
+				result.Metadata = map[string]any{"hash": value}
+			case "journal":
+				result.Content += "Journal: " + value + "\n"
+			case "doi":
+				result.Metadata = map[string]any{"doi": value}
+			}
+		}
+	}
+
+	return result
 }
 
 func unifiedSearchArxiv(ctx context.Context, query string, topK int) ([]SearchResult, error) {
-	// TODO: Call arXiv MCP
-	return []SearchResult{}, nil
+	registry := GetMCPRegistry()
+	if registry == nil {
+		return nil, fmt.Errorf("mcp registry not initialized")
+	}
+
+	server, exists := registry.Get("arxiv")
+	if !exists {
+		return nil, fmt.Errorf("arxiv MCP server not found")
+	}
+	if !server.Initialized {
+		return nil, fmt.Errorf("arxiv MCP server not initialized")
+	}
+
+	if topK <= 0 {
+		topK = 10
+	}
+	if topK > 50 {
+		topK = 50
+	}
+
+	toolResult, err := callMCPTool(ctx, server, "search_arxiv", map[string]any{
+		"query":       query,
+		"max_results": topK,
+		"sort_by":     "relevance",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("search_arxiv: %w", err)
+	}
+
+	type arxivPaper struct {
+		ID        string   `json:"id"`
+		Title     string   `json:"title"`
+		Summary   string   `json:"summary"`
+		Authors   []string `json:"authors"`
+		Published string   `json:"published"`
+		URL       string   `json:"url"`
+		PDFURL    string   `json:"pdf_url"`
+	}
+
+	type arxivPayload struct {
+		Query    string       `json:"query"`
+		Returned int          `json:"returned"`
+		Papers   []arxivPaper `json:"papers"`
+	}
+
+	payload := arxivPayload{}
+	if content, ok := toolResult["content"].([]any); ok && len(content) > 0 {
+		if first, ok := content[0].(map[string]any); ok {
+			if text, ok := first["text"].(string); ok && strings.TrimSpace(text) != "" {
+				_ = json.Unmarshal([]byte(text), &payload)
+			}
+		}
+	}
+
+	if len(payload.Papers) == 0 {
+		if papersRaw, ok := toolResult["papers"].([]any); ok {
+			for _, p := range papersRaw {
+				if m, ok := p.(map[string]any); ok {
+					paper := arxivPaper{}
+					if v, ok := m["id"].(string); ok {
+						paper.ID = v
+					}
+					if v, ok := m["title"].(string); ok {
+						paper.Title = v
+					}
+					if v, ok := m["summary"].(string); ok {
+						paper.Summary = v
+					}
+					if v, ok := m["authors"].([]any); ok {
+						for _, a := range v {
+							if s, ok := a.(string); ok {
+								paper.Authors = append(paper.Authors, s)
+							}
+						}
+					}
+					if v, ok := m["url"].(string); ok {
+						paper.URL = v
+					}
+					if v, ok := m["pdf_url"].(string); ok {
+						paper.PDFURL = v
+					}
+					payload.Papers = append(payload.Papers, paper)
+				}
+			}
+		}
+	}
+
+	results := make([]SearchResult, 0, len(payload.Papers))
+	for _, paper := range payload.Papers {
+		authors := strings.Join(paper.Authors, ", ")
+		content := fmt.Sprintf("Authors: %s\nPublished: %s\n\n%s", authors, paper.Published, paper.Summary)
+		if len(content) > 500 {
+			content = content[:500] + "..."
+		}
+
+		url := paper.URL
+		if url == "" && paper.ID != "" {
+			url = "https://arxiv.org/abs/" + paper.ID
+		}
+
+		results = append(results, SearchResult{
+			Source:     "arxiv",
+			SourceType: "paper",
+			Title:      paper.Title,
+			Content:    content,
+			URL:        url,
+			Score:      0.8,
+			Metadata:   map[string]any{"paper_id": paper.ID, "pdf_url": paper.PDFURL},
+		})
+	}
+
+	return results, nil
 }
 
 func unifiedSearchGitHub(ctx context.Context, query string, topK int) ([]SearchResult, error) {
-	// TODO: Implement GitHub search
-	return []SearchResult{}, nil
+	fetcher, err := NewGitHubFetcherFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("GitHub fetcher init failed: %w", err)
+	}
+
+	if topK <= 0 {
+		topK = 10
+	}
+	if topK > 100 {
+		topK = 100
+	}
+
+	searchResults, err := fetcher.SearchCode(ctx, query, topK)
+	if err != nil {
+		return nil, fmt.Errorf("GitHub search failed: %w", err)
+	}
+
+	results := make([]SearchResult, 0, len(searchResults.Items))
+	for _, item := range searchResults.Items {
+		content := fmt.Sprintf("Repository: %s\nPath: %s", item.Repository.FullName, item.Path)
+		if len(item.TextMatches) > 0 {
+			if fragment, ok := item.TextMatches[0]["fragment"].(string); ok {
+				content = fragment
+			}
+		}
+
+		results = append(results, SearchResult{
+			Source:     "github",
+			SourceType: "code",
+			Title:      fmt.Sprintf("%s/%s", item.Repository.FullName, item.Path),
+			Content:    content,
+			URL:        fmt.Sprintf("https://github.com/%s/blob/main/%s", item.Repository.FullName, item.Path),
+			Score:      item.Score / float64(searchResults.TotalCount+1),
+		})
+	}
+
+	return results, nil
 }
 
 func unifiedSearchCOS(ctx context.Context, query string, topK int) ([]SearchResult, error) {
@@ -465,9 +746,9 @@ func unifiedSearchCourseRead(ctx context.Context, query string, topK int) ([]Sea
 				URL:        fmt.Sprintf("https://github.com/%s/%s", org, repo),
 				Score:      1.0,
 				Metadata: map[string]any{
-					"toml":   tomlContent,
-					"repo":   repo,
-					"org":    org,
+					"toml": tomlContent,
+					"repo": repo,
+					"org":  org,
 				},
 			})
 		}
@@ -538,21 +819,23 @@ func extractPinyin(query string) string {
 }
 
 func summarizeWithLLM(ctx context.Context, query string, results []SearchResult) (string, []string) {
-	// Build context
-	var contentBuilder strings.Builder
-	contentBuilder.WriteString(fmt.Sprintf("用户查询: %s\n\n搜索结果:\n\n", query))
-
-	for i, r := range results {
-		if i >= 10 {
-			break
-		}
-		contentBuilder.WriteString(fmt.Sprintf("%d. %s (来源: %s)\n", i+1, r.Title, r.Source))
-		contentBuilder.WriteString(fmt.Sprintf("   内容: %s\n\n", truncateStr(r.Content, 200)))
+	req := &SummarizeRequest{
+		Query:     query,
+		Results:   results,
+		Style:     "concise",
+		MaxLength: 500,
+		Language:  "auto",
 	}
 
-	// TODO: Call LLM for summarization
-	// For now, return placeholder
-	return "总结功能待实现", []string{"需要接入 LLM"}
+	prompt := buildSummarizationPrompt(req)
+	summary, keyPoints, err := callBigModelForSummary(ctx, prompt, req.MaxLength)
+	if err != nil {
+		return fmt.Sprintf("搜索结果共 %d 条，主要涉及: %s", len(results), query), nil
+	}
+	if keyPoints == nil {
+		keyPoints = []string{}
+	}
+	return summary, keyPoints
 }
 
 func truncateStr(s string, maxLen int) string {

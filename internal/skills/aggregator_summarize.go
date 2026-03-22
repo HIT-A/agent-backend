@@ -219,20 +219,30 @@ func buildSummarizationPrompt(req *SummarizeRequest) string {
 	return b.String()
 }
 
-// callBigModelForSummary calls the BigModel API for text generation
+// callBigModelForSummary calls the BigModel or MiniMax API for text generation
 func callBigModelForSummary(ctx context.Context, prompt string, maxLength int) (string, []string, error) {
-	apiKey := os.Getenv("BIGMODEL_API_KEY")
+	// Try MiniMax first, then fall back to BigModel
+	apiKey := os.Getenv("MINIMAX_API_KEY")
+	endpoint := "https://api.minimaxi.com/v1/text/chatcompletion_v2"
+	model := os.Getenv("MINIMAX_MODEL")
+	if model == "" {
+		model = "MiniMax-M2.2"
+	}
+
+	if apiKey == "" {
+		// Fall back to BigModel
+		apiKey = os.Getenv("BIGMODEL_API_KEY")
+		model = os.Getenv("BIGMODEL_SUMMARIZE_MODEL")
+		if model == "" {
+			model = "glm-4"
+		}
+		endpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+	}
+
 	if apiKey == "" {
 		// Fallback to simple extractive summary if no API key
 		return fallbackSummarize(prompt), nil, nil
 	}
-
-	model := os.Getenv("BIGMODEL_SUMMARIZE_MODEL")
-	if model == "" {
-		model = "glm-4" // Default to GLM-4 for summarization
-	}
-
-	endpoint := "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
 	// Build request body
 	reqBody, err := json.Marshal(map[string]any{

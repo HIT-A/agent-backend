@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
+
+	"github.com/tencentyun/cos-go-sdk-v5"
 )
 
-// Client is a simplified COS client interface
 type Client struct {
+	client *cos.Client
 	bucket string
 	region string
 }
@@ -23,7 +26,6 @@ type UploadResult struct {
 	AccessURL string `json:"access_url"`
 }
 
-// NewClient creates a COS client
 func NewClient(secretID, secretKey, region, bucket string) (*Client, error) {
 	if secretID == "" || secretKey == "" {
 		return nil, fmt.Errorf("COS credentials required")
@@ -35,32 +37,58 @@ func NewClient(secretID, secretKey, region, bucket string) (*Client, error) {
 		bucket = "hita-courses"
 	}
 
+	u, err := url.Parse(fmt.Sprintf("https://%s.cos.%s.myqcloud.com", bucket, region))
+	if err != nil {
+		return nil, fmt.Errorf("invalid COS URL: %w", err)
+	}
+
+	baseURL := &cos.BaseURL{
+		BucketURL: u,
+	}
+
+	client := cos.NewClient(baseURL, &http.Client{
+		Transport: &cos.AuthorizationTransport{
+			SecretID:  secretID,
+			SecretKey: secretKey,
+		},
+	})
+
 	return &Client{
+		client: client,
 		bucket: bucket,
 		region: region,
 	}, nil
 }
 
-// NewClientFromEnv creates client from environment
 func NewClientFromEnv() (*Client, error) {
 	secretID := os.Getenv("COS_SECRET_ID")
 	secretKey := os.Getenv("COS_SECRET_KEY")
 	region := os.Getenv("COS_REGION")
 	bucket := os.Getenv("COS_BUCKET")
 
-	if secretID == "" {
-		secretID = "placeholder"
-	}
-	if secretKey == "" {
-		secretKey = "placeholder"
+	if secretID == "" || secretKey == "" {
+		return nil, fmt.Errorf("COS credentials required: set COS_SECRET_ID and COS_SECRET_KEY")
 	}
 
 	return NewClient(secretID, secretKey, region, bucket)
 }
 
-// Upload uploads a file
 func (c *Client) Upload(ctx context.Context, key string, reader *bytes.Reader, size int64) (*UploadResult, error) {
-	// TODO: Implement actual COS SDK upload
+	if c.client == nil {
+		return nil, fmt.Errorf("COS client not initialized")
+	}
+
+	opts := &cos.ObjectPutOptions{
+		ObjectPutHeaderOptions: &cos.ObjectPutHeaderOptions{
+			ContentLength: size,
+		},
+	}
+
+	_, err := c.client.Object.Put(ctx, key, reader, opts)
+	if err != nil {
+		return nil, fmt.Errorf("COS upload failed: %w", err)
+	}
+
 	return &UploadResult{
 		FileID:    key,
 		Size:      size,
@@ -69,18 +97,14 @@ func (c *Client) Upload(ctx context.Context, key string, reader *bytes.Reader, s
 	}, nil
 }
 
-// DownloadBytes downloads a file and returns bytes
 func (c *Client) DownloadBytes(ctx context.Context, key string) ([]byte, error) {
-	url := c.GetPublicURL(key)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+	if c.client == nil {
+		return nil, fmt.Errorf("COS client not initialized")
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.client.Object.Get(ctx, key, nil)
 	if err != nil {
-		return nil, fmt.Errorf("download failed: %w", err)
+		return nil, fmt.Errorf("COS download failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -88,13 +112,16 @@ func (c *Client) DownloadBytes(ctx context.Context, key string) ([]byte, error) 
 		return nil, fmt.Errorf("file not found: %s", key)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download failed: status=%d", resp.StatusCode)
+		return nil, fmt.Errorf("COS download failed: status=%d", resp.StatusCode)
 	}
 
-	return io.ReadAll(resp.Body)
+	// Limit to 100MB max to prevent OOM
+	const maxDownloadSize = 100 * 1024 * 1024
+	limitedReader := io.LimitReader(resp.Body, maxDownloadSize)
+
+	return io.ReadAll(limitedReader)
 }
 
-// Download downloads a file to a writer
 func (c *Client) Download(ctx context.Context, key string, writer io.Writer) error {
 	content, err := c.DownloadBytes(ctx, key)
 	if err != nil {
@@ -104,22 +131,82 @@ func (c *Client) Download(ctx context.Context, key string, writer io.Writer) err
 	return err
 }
 
-// Delete deletes a file
 func (c *Client) Delete(ctx context.Context, key string) error {
+	if c.client == nil {
+		return fmt.Errorf("COS client not initialized")
+	}
+
+	_, err := c.client.Object.Delete(ctx, key, nil)
+	if err != nil {
+		return fmt.Errorf("COS delete failed: %w", err)
+	}
+
 	return nil
 }
 
-// GetPresignedURL generates temporary URL
 func (c *Client) GetPresignedURL(ctx context.Context, key string, expires time.Duration) (string, error) {
-	return c.GetPublicURL(key) + "?expires=" + expires.String(), nil
+	if c.client == nil {
+		return "", fmt.Errorf("COS client not initialized")
+	}
+
+	secretID := os.Getenv("COS_SECRET_ID")
+	secretKey := os.Getenv("COS_SECRET_KEY")
+
+	presignedURL, err := c.client.Object.GetPresignedURL(ctx, http.MethodGet, key, secretID, secretKey, expires, nil)
+	if err != nil {
+		return "", fmt.Errorf("generate presigned URL failed: %w", err)
+	}
+
+	return presignedURL.String(), nil
 }
 
-// ListFiles lists files
 func (c *Client) ListFiles(ctx context.Context, prefix string, maxKeys int) ([]map[string]interface{}, error) {
-	return []map[string]interface{}{}, nil
+	if c.client == nil {
+		return nil, fmt.Errorf("COS client not initialized")
+	}
+
+	if maxKeys <= 0 {
+		maxKeys = 100
+	}
+	if maxKeys > 1000 {
+		maxKeys = 1000
+	}
+
+	opt := &cos.BucketGetOptions{
+		Prefix:  prefix,
+		MaxKeys: maxKeys,
+	}
+
+	var results []map[string]interface{}
+
+	for {
+		v, _, err := c.client.Bucket.Get(ctx, opt)
+		if err != nil {
+			return nil, fmt.Errorf("COS list failed: %w", err)
+		}
+
+		for _, content := range v.Contents {
+			results = append(results, map[string]interface{}{
+				"key":           content.Key,
+				"size":          content.Size,
+				"last_modified": content.LastModified,
+				"etag":          content.ETag,
+			})
+		}
+
+		if !v.IsTruncated {
+			break
+		}
+
+		opt.Marker = v.NextMarker
+		if opt.Marker == "" {
+			break
+		}
+	}
+
+	return results, nil
 }
 
-// GetPublicURL returns public URL
 func (c *Client) GetPublicURL(key string) string {
 	return fmt.Sprintf("https://%s.cos.%s.myqcloud.com/%s", c.bucket, c.region, key)
 }

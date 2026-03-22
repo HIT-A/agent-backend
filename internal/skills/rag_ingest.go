@@ -130,7 +130,7 @@ func NewRAGIngestSkill(cosStorage *cos.Storage) Skill {
 				go func(workerID int) {
 					defer wg.Done()
 					for task := range fileChan {
-						result := processFile(ctx, task, in, fetcher, qdrant, embedder, cosStorage)
+						result := processFile(ctx, task, in, fetcher, qdrant, embedder, cosStorage, &processedChunks)
 						resultChan <- result
 
 						// Update counters atomically
@@ -181,7 +181,7 @@ func NewRAGIngestSkill(cosStorage *cos.Storage) Skill {
 
 func processFile(ctx context.Context, task FileTask, in RAGIngestInput,
 	fetcher *GitHubFetcher, qdrant *QdrantClient, embedder EmbeddingProvider,
-	cosStorage *cos.Storage) FileResult {
+	cosStorage *cos.Storage, processedChunks *int64) FileResult {
 
 	result := FileResult{File: task.File}
 
@@ -230,7 +230,7 @@ func processFile(ctx context.Context, task FileTask, in RAGIngestInput,
 	// Create points from chunks
 	points := make([]QdrantPoint, 0, len(chunks))
 	for _, ch := range chunks {
-		if atomic.LoadInt64(&processedChunks) >= int64(in.MaxChunks) {
+		if atomic.LoadInt64(processedChunks) >= int64(in.MaxChunks) {
 			break
 		}
 
@@ -357,11 +357,4 @@ func stablePointID(docID, chunkID string) string {
 	h := sha256.Sum256([]byte(docID + ":" + chunkID))
 	s := hex.EncodeToString(h[:16])
 	return fmt.Sprintf("%s-%s-%s-%s-%s", s[0:8], s[8:12], s[12:16], s[16:20], s[20:32])
-}
-
-// processedChunks is used for checking max chunks limit across goroutines
-var processedChunks int64
-
-func init() {
-	processedChunks = 0
 }

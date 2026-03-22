@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -14,6 +16,7 @@ type Storage struct {
 	maxSize    int64
 	quotaLimit int64
 	usedToday  int64
+	mu         sync.RWMutex
 }
 
 // NewStorage creates storage instance
@@ -31,7 +34,11 @@ func NewStorage(client *Client, maxSize int64) *Storage {
 
 // NewDefaultStorage creates storage with defaults
 func NewDefaultStorage() *Storage {
-	client, _ := NewClientFromEnv()
+	client, err := NewClientFromEnv()
+	if err != nil {
+		log.Printf("WARNING: COS initialization failed: %v", err)
+		log.Printf("WARNING: COS operations will fail. Set COS_SECRET_ID and COS_SECRET_KEY environment variables.")
+	}
 	return NewStorage(client, 10*1024*1024)
 }
 
@@ -42,16 +49,23 @@ func (s *Storage) SaveFile(ctx context.Context, key string, content []byte, cont
 	if size > s.maxSize {
 		return nil, fmt.Errorf("file too large: %d bytes (max: %d)", size, s.maxSize)
 	}
+
+	s.mu.Lock()
 	if s.usedToday+size > s.quotaLimit {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("quota exceeded")
 	}
+	s.usedToday += size
+	s.mu.Unlock()
 
 	result, err := s.client.Upload(ctx, key, bytes.NewReader(content), size)
 	if err != nil {
+		s.mu.Lock()
+		s.usedToday -= size
+		s.mu.Unlock()
 		return nil, err
 	}
 
-	s.usedToday += size
 	return result, nil
 }
 
@@ -98,12 +112,16 @@ func (s *Storage) GetPresignedURL(ctx context.Context, key string, expires time.
 	return s.client.GetPresignedURL(ctx, key, expires)
 }
 
-// GetQuota returns usage
+// GetQuota returns usage (read-lock for concurrent access)
 func (s *Storage) GetQuota() (used int64, limit int64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.usedToday, s.quotaLimit
 }
 
 // ResetDailyQuota resets quota
 func (s *Storage) ResetDailyQuota() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.usedToday = 0
 }

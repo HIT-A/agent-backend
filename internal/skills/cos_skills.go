@@ -450,25 +450,3 @@ func cosGetPresignedURLsBatch(ctx context.Context, keys []any, input map[string]
 		"results":         results,
 	}, nil
 }
-
-// NewCOSGetQuotaSkill creates a skill to check quota.
-func NewCOSGetQuotaSkill(storage *cos.Storage) Skill {
-	return Skill{
-		Name:    "cos.get_quota",
-		IsAsync: false,
-		Invoke: func(ctx context.Context, input map[string]any, trace map[string]any) (map[string]any, error) {
-			_ = trace
-			_ = input
-
-			used, limit := storage.GetQuota()
-
-			return map[string]any{
-				"used_bytes":  used,
-				"limit_bytes": limit,
-				"used_gb":     float64(used) / (1024 * 1024 * 1024),
-				"limit_gb":    float64(limit) / (1024 * 1024 * 1024),
-				"percentage":  float64(used) / float64(limit) * 100,
-			}, nil
-		},
-	}
-}

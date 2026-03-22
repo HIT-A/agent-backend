@@ -76,6 +76,17 @@ func registerDefaultMCPServers() {
 		Command:   []string{"python3", "/root/agent-backend/mcp-servers/crawl4ai/server.py"},
 	}
 	registerMCPServerAsync(crawl4AIConfig)
+
+	// Unstructured MCP Server (文档格式转换)
+	// Converts PDF, DOCX, PPTX to Markdown
+	// Requires: pip install unstructured PyMuPDF python-docx python-pptx
+	unstructuredConfig := &mcp.ServerConfig{
+		Name:      "unstructured",
+		Enabled:   true,
+		Transport: "stdio",
+		Command:   []string{"python3", "/root/agent-backend/mcp-servers/unstructured/server.py"},
+	}
+	registerMCPServerAsync(unstructuredConfig)
 }
 
 func registerMCPServerAsync(config *mcp.ServerConfig) {
@@ -127,7 +138,6 @@ func NewRegistry() *Registry {
 	r.Register(NewCOSDeleteFileSkill(cosStorage))
 	r.Register(NewCOSListFilesSkill(cosStorage))
 	r.Register(NewCOSGetPresignedURLSkill(cosStorage))
-	r.Register(NewCOSGetQuotaSkill(cosStorage))
 
 	// Register RAG ingestion skill
 	r.Register(NewRAGIngestSkill(cosStorage))
@@ -165,10 +175,7 @@ func NewRegistry() *Registry {
 	r.Register(NewRAGIngestFromGitHubSkill(mcpRegistry, cosStorage))
 
 	// Register RAG sync to repo skill
-	r.Register(NewRAGSyncToRepoSkill(cosStorage))
-
-	// Register manual intake folder pipeline skill
-	r.Register(NewRAGIntakeManualFolderSkill(cosStorage))
+	r.Register(NewRAGSyncToRepoSkill(cosStorage, mcpRegistry))
 
 	return r
 }

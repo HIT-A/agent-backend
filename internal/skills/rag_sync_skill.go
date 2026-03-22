@@ -2,6 +2,9 @@ package skills
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -13,6 +16,7 @@ import (
 	"time"
 
 	"hoa-agent-backend/internal/cos"
+	"hoa-agent-backend/internal/mcp"
 )
 
 // RAGSyncConfig 配置
@@ -45,6 +49,7 @@ type RAGSource struct {
 	PathPrefix string   `json:"path_prefix"`
 	FileTypes  []string `json:"file_types"`
 	MaxFiles   int      `json:"max_files"`
+	MaxSizeKB  int      `json:"max_size_kb"` // 单文件最大大小限制，默认512KB (0.5MB)
 }
 
 // SourceMetadata 元数据
@@ -82,7 +87,7 @@ type fileResult struct {
 }
 
 // NewRAGSyncToRepoSkill 创建完整编排技能
-func NewRAGSyncToRepoSkill(cosStorage *cos.Storage) Skill {
+func NewRAGSyncToRepoSkill(cosStorage *cos.Storage, mcpRegistry *mcp.Registry) Skill {
 	return Skill{
 		Name:    "rag.sync_to_repo",
 		IsAsync: true,
@@ -101,8 +106,22 @@ func NewRAGSyncToRepoSkill(cosStorage *cos.Storage) Skill {
 			var allMetadata []SourceMetadata
 			var totalFiles, totalChunks int
 
+			var qdrant *QdrantClient
+			var embedder EmbeddingProvider
+			if config.AutoIngestRAG {
+				qdrant, err = NewQdrantClientFromEnv()
+				if err == nil {
+					embedder, err = NewEmbeddingProviderFromEnv()
+					if err != nil {
+						return nil, &InvokeError{Code: "INTERNAL", Message: fmt.Sprintf("embedder init: %v", err), Retryable: true}
+					}
+				} else {
+					return nil, &InvokeError{Code: "INTERNAL", Message: fmt.Sprintf("qdrant init: %v", err), Retryable: true}
+				}
+			}
+
 			for _, source := range config.Sources {
-				metadata, files, chunks, err := processSource(ctx, source, repoPath, config, cosStorage)
+				metadata, files, chunks, err := processSource(ctx, source, repoPath, config, cosStorage, mcpRegistry, qdrant, embedder)
 				if err != nil {
 					return nil, &InvokeError{Code: "INTERNAL", Message: fmt.Sprintf("process source %s: %v", source.Repo, err), Retryable: true}
 				}
@@ -184,6 +203,9 @@ func parseRAGSyncConfig(input map[string]any) RAGSyncConfig {
 				if maxFiles, ok := sm["max_files"].(float64); ok {
 					source.MaxFiles = int(maxFiles)
 				}
+				if maxSizeKB, ok := sm["max_size_kb"].(float64); ok {
+					source.MaxSizeKB = int(maxSizeKB)
+				}
 				if fileTypes, ok := sm["file_types"].([]any); ok {
 					for _, ft := range fileTypes {
 						if fts, ok := ft.(string); ok {
@@ -251,7 +273,7 @@ func prepareLocalRepo(ctx context.Context, config RAGSyncConfig) (string, error)
 	return repoPath, nil
 }
 
-func processSource(ctx context.Context, source RAGSource, repoPath string, config RAGSyncConfig, cosStorage *cos.Storage) (SourceMetadata, int, int, error) {
+func processSource(ctx context.Context, source RAGSource, repoPath string, config RAGSyncConfig, cosStorage *cos.Storage, mcpRegistry *mcp.Registry, qdrant *QdrantClient, embedder EmbeddingProvider) (SourceMetadata, int, int, error) {
 	metadata := SourceMetadata{}
 	metadata.Source.Type = source.Type
 	metadata.Source.Repo = source.Repo
@@ -262,14 +284,14 @@ func processSource(ctx context.Context, source RAGSource, repoPath string, confi
 
 	switch source.Type {
 	case "github":
-		files, chunks, err := processGitHubSource(ctx, source, repoPath, config, cosStorage, &metadata)
+		files, chunks, err := processGitHubSource(ctx, source, repoPath, config, cosStorage, mcpRegistry, &metadata, qdrant, embedder)
 		if err != nil {
 			return metadata, 0, 0, err
 		}
 		totalFiles = files
 		totalChunks = chunks
 	case "crawl":
-		// TODO: 实现爬虫来源
+		totalFiles, totalChunks, _ = processCrawlSource(ctx, source, repoPath, config, cosStorage, mcpRegistry)
 	}
 
 	metadata.Sync.FilesTotal = totalFiles
@@ -279,7 +301,7 @@ func processSource(ctx context.Context, source RAGSource, repoPath string, confi
 	return metadata, totalFiles, totalChunks, nil
 }
 
-func processGitHubSource(ctx context.Context, source RAGSource, repoPath string, config RAGSyncConfig, cosStorage *cos.Storage, metadata *SourceMetadata) (int, int, error) {
+func processGitHubSource(ctx context.Context, source RAGSource, repoPath string, config RAGSyncConfig, cosStorage *cos.Storage, mcpRegistry *mcp.Registry, metadata *SourceMetadata, qdrant *QdrantClient, embedder EmbeddingProvider) (int, int, error) {
 	fetcher, err := NewGitHubFetcherFromEnv()
 	if err != nil {
 		return 0, 0, err
@@ -291,16 +313,31 @@ func processGitHubSource(ctx context.Context, source RAGSource, repoPath string,
 		return 0, 0, err
 	}
 
-	// 过滤文件类型
+	// 过滤文件类型 + 大小限制
 	var filteredFiles []RepoFile
+	maxSizeKB := source.MaxSizeKB
+	if maxSizeKB == 0 {
+		maxSizeKB = 512 // 默认 0.5MB
+	}
+	maxSizeBytes := maxSizeKB * 1024
+
 	for _, f := range files {
 		ext := strings.ToLower(filepath.Ext(f.Path))
-		for _, allowed := range source.FileTypes {
-			if ext == allowed {
-				filteredFiles = append(filteredFiles, f)
+		allowed := false
+		for _, t := range source.FileTypes {
+			if ext == t {
+				allowed = true
 				break
 			}
 		}
+		if !allowed {
+			continue
+		}
+		// 按文件大小过滤
+		if f.Size > maxSizeBytes {
+			continue
+		}
+		filteredFiles = append(filteredFiles, f)
 	}
 
 	if len(filteredFiles) > source.MaxFiles {
@@ -330,7 +367,7 @@ func processGitHubSource(ctx context.Context, source RAGSource, repoPath string,
 		wg.Add(1)
 		go func(f RepoFile) {
 			defer wg.Done()
-			result := processGitHubFile(ctx, fetcher, source, f, rawDir, convertedDir, cosStorage, config)
+			result := processGitHubFile(ctx, fetcher, source, f, rawDir, convertedDir, cosStorage, config, mcpRegistry, qdrant, embedder)
 			resultChan <- result
 		}(file)
 	}
@@ -351,7 +388,7 @@ func processGitHubSource(ctx context.Context, source RAGSource, repoPath string,
 	return processedFiles, totalChunks, nil
 }
 
-func processGitHubFile(ctx context.Context, fetcher *GitHubFetcher, source RAGSource, file RepoFile, rawDir, convertedDir string, cosStorage *cos.Storage, config RAGSyncConfig) fileResult {
+func processGitHubFile(ctx context.Context, fetcher *GitHubFetcher, source RAGSource, file RepoFile, rawDir, convertedDir string, cosStorage *cos.Storage, config RAGSyncConfig, mcpRegistry *mcp.Registry, qdrant *QdrantClient, embedder EmbeddingProvider) fileResult {
 	result := fileResult{}
 
 	// 获取文件内容
@@ -361,57 +398,94 @@ func processGitHubFile(ctx context.Context, fetcher *GitHubFetcher, source RAGSo
 		return result
 	}
 
-	// 保存原始文件
-	rawPath := filepath.Join(rawDir, filepath.Base(file.Path))
+	relPath := file.Path
+
+	// SHA256 dedup check
+	contentHash := sha256.Sum256(content.Content)
+	sha256Hex := hex.EncodeToString(contentHash[:])
+
+	dedupStore, _ := NewDedupStoreFromEnv()
+	if dedupStore != nil {
+		shouldIngest, existing, _ := dedupStore.ShouldIngest(ctx, sha256Hex)
+		if !shouldIngest {
+			result.info = FileInfo{
+				Original:  relPath,
+				Converted: existing.COSKey,
+				Size:      int64(len(content.Content)),
+				Chunks:    0,
+			}
+			result.err = fmt.Errorf("duplicate SHA256: %s (COS: %s)", sha256Hex[:12], existing.COSKey)
+			dedupStore.Close()
+			return result
+		}
+	}
+
+	// 保存原始文件到 GitHub audit trail
+	rawPath := filepath.Join(rawDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(rawPath), 0755); err != nil {
+		result.err = err
+		return result
+	}
 	if err := os.WriteFile(rawPath, content.Content, 0644); err != nil {
 		result.err = err
 		return result
 	}
 
-	// 转换为 Markdown（如果是 txt/md 直接复制）
-	convertedPath := filepath.Join(convertedDir, strings.TrimSuffix(filepath.Base(file.Path), filepath.Ext(file.Path))+".md")
-	ext := strings.ToLower(filepath.Ext(file.Path))
+	// 存储到 COS
+	var cosKey string
+	if config.StoreInCOS && cosStorage != nil {
+		cosKey = fmt.Sprintf("%s/%s/%s/%s", config.COSPrefix, strings.ReplaceAll(source.Repo, "/", "-"), sha256Hex[:12], relPath)
+		if _, err := cosStorage.SaveFile(ctx, cosKey, content.Content, "application/octet-stream"); err != nil {
+			result.err = fmt.Errorf("COS save: %w", err)
+			return result
+		}
+	}
 
+	// 记录到 dedup store
+	if dedupStore != nil && cosKey != "" {
+		dedupStore.Record(ctx, sha256Hex, cosKey, int64(file.Size))
+		dedupStore.Close()
+	}
+
+	// 转换为 Markdown
+	ext := strings.ToLower(filepath.Ext(file.Path))
 	var markdownContent []byte
 	if ext == ".md" || ext == ".txt" {
 		markdownContent = content.Content
 	} else {
-		// TODO: 调用 Unstructured MCP 转换
-		markdownContent = content.Content // 暂时直接使用
+		markdownContent = convertToMarkdownWithUnstructured(ctx, mcpRegistry, content.Content, file.Path)
 	}
 
 	// 添加来源信息头部
-	header := fmt.Sprintf("---\nsource: %s\noriginal_path: %s\ndownloaded: %s\n---\n\n",
-		source.Repo, file.Path, time.Now().Format(time.RFC3339))
+	header := fmt.Sprintf("---\nsource: %s\noriginal_path: %s\nsha256: %s\ndownloaded: %s\n---\n\n",
+		source.Repo, file.Path, sha256Hex, time.Now().Format(time.RFC3339))
 	markdownContent = append([]byte(header), markdownContent...)
 
+	// 保存转换后文件到 GitHub audit trail
+	safeRelPath := strings.ReplaceAll(relPath, "/", "_")
+	convertedBase := strings.TrimSuffix(safeRelPath, filepath.Ext(safeRelPath))
+	convertedPath := filepath.Join(convertedDir, convertedBase+".md")
 	if err := os.WriteFile(convertedPath, markdownContent, 0644); err != nil {
 		result.err = err
 		return result
 	}
 
-	// 上传到 COS
-	var cosKey string
-	if config.StoreInCOS && cosStorage != nil {
-		cosKey = fmt.Sprintf("%s/%s/%s.md", config.COSPrefix, strings.ReplaceAll(source.Repo, "/", "-"), strings.ReplaceAll(file.Path, "/", "-"))
-		if _, err := cosStorage.SaveFile(ctx, cosKey, markdownContent, "text/markdown"); err != nil {
-			// 记录错误但继续
-			cosKey = ""
+	// 直接 RAG ingest 到 Qdrant
+	var chunks int
+	if config.AutoIngestRAG && qdrant != nil && embedder != nil {
+		sourceTag := fmt.Sprintf("sync/%s/%s", source.Repo, relPath)
+		chunks, err = IngestMarkdownDirect(ctx, markdownContent, relPath, sourceTag, cosStorage, mcpRegistry, qdrant, embedder)
+		if err != nil {
+			result.err = fmt.Errorf("RAG ingest: %w", err)
+			return result
 		}
 	}
 
-	// 计算块数
-	chunks := len(markdownContent) / 1400
-	if chunks == 0 {
-		chunks = 1
-	}
-
 	result.info = FileInfo{
-		Original:  file.Path,
-		Converted: filepath.Base(convertedPath),
+		Original:  relPath,
+		Converted: relPath + ".md",
 		Size:      int64(len(markdownContent)),
 		Chunks:    chunks,
-		COSKey:    cosKey,
 	}
 	result.chunks = chunks
 
@@ -540,4 +614,126 @@ func configureGitRemoteForAuth(ctx context.Context, repoPath, targetRepo string)
 		return fmt.Errorf("git remote set-url failed: %w\n%s", err, output)
 	}
 	return nil
+}
+
+func convertToMarkdownWithUnstructured(ctx context.Context, mcpRegistry *mcp.Registry, content []byte, filename string) []byte {
+	if mcpRegistry == nil {
+		return content
+	}
+
+	server, exists := mcpRegistry.Get("unstructured")
+	if !exists || !server.Initialized {
+		return content
+	}
+
+	contentBase64 := base64.StdEncoding.EncodeToString(content)
+
+	result, err := callMCPTool(ctx, server, "convert_to_markdown", map[string]any{
+		"content_base64": contentBase64,
+		"filename":       filename,
+	})
+	if err != nil {
+		return content
+	}
+
+	if md, ok := result["markdown"].(string); ok && md != "" {
+		return []byte(md)
+	}
+
+	return content
+}
+
+func processCrawlSource(ctx context.Context, source RAGSource, repoPath string, config RAGSyncConfig, cosStorage *cos.Storage, mcpRegistry *mcp.Registry) (int, int, error) {
+	totalFiles := 0
+	totalChunks := 0
+
+	if source.URL == "" {
+		return 0, 0, nil
+	}
+
+	if mcpRegistry == nil {
+		return 0, 0, fmt.Errorf("MCP registry not available")
+	}
+
+	server, exists := mcpRegistry.Get("crawl4ai")
+	if !exists {
+		return 0, 0, fmt.Errorf("crawl4ai MCP server not registered")
+	}
+	if !server.Initialized {
+		return 0, 0, fmt.Errorf("crawl4ai MCP server not initialized")
+	}
+
+	// 创建来源目录
+	safeURL := strings.ReplaceAll(source.URL, "://", "-")
+	safeURL = strings.ReplaceAll(safeURL, "/", "-")
+	safeURL = strings.ReplaceAll(safeURL, ".", "-")
+	safeURL = strings.ReplaceAll(safeURL, ":", "-")
+	sourceDir := filepath.Join(repoPath, "sources", "crawled", safeURL)
+	rawDir := sourceDir
+
+	if err := os.MkdirAll(rawDir, 0755); err != nil {
+		return 0, 0, fmt.Errorf("create directory failed: %w", err)
+	}
+
+	// 调用 crawl4ai 爬取页面
+	args := map[string]any{
+		"url":            source.URL,
+		"content_filter": true,
+		"output_format":  "markdown",
+	}
+
+	result, err := callMCPTool(ctx, server, "crawl_page", args)
+	if err != nil {
+		return 0, 0, fmt.Errorf("crawl4ai call failed: %w", err)
+	}
+
+	// 提取 markdown 内容
+	var markdownContent string
+	if content, ok := result["markdown"].(string); ok && content != "" {
+		markdownContent = content
+	} else if html, ok := result["html"].(string); ok && html != "" {
+		markdownContent = html
+	} else if raw, ok := result["raw_result"].(string); ok && raw != "" {
+		markdownContent = raw
+	} else {
+		// 尝试从 JSON 中提取
+		jsonBytes, _ := json.Marshal(result)
+		markdownContent = string(jsonBytes)
+	}
+
+	if markdownContent == "" {
+		return 0, 0, fmt.Errorf("no content extracted from crawl result")
+	}
+
+	// 保存原始内容
+	filename := fmt.Sprintf("%s.md", safeURL[:min(len(safeURL), 50)])
+	rawPath := filepath.Join(rawDir, filename)
+	if err := os.WriteFile(rawPath, []byte(markdownContent), 0644); err != nil {
+		return 0, 0, fmt.Errorf("write file failed: %w", err)
+	}
+
+	// 添加来源信息头部
+	header := fmt.Sprintf("---\nsource: crawl\nurl: %s\ndownloaded: %s\n---\n\n",
+		source.URL, time.Now().Format(time.RFC3339))
+	markdownWithHeader := append([]byte(header), []byte(markdownContent)...)
+
+	// 上传到 COS
+	cosKey := ""
+	if config.StoreInCOS && cosStorage != nil {
+		cosKey = fmt.Sprintf("%s/crawled/%s/%s.md", config.COSPrefix, safeURL[:min(len(safeURL), 50)], safeURL[:min(len(safeURL), 50)])
+		if _, err := cosStorage.SaveFile(ctx, cosKey, markdownWithHeader, "text/markdown"); err != nil {
+			cosKey = ""
+		}
+	}
+
+	// 计算块数
+	chunks := len(markdownWithHeader) / 1400
+	if chunks == 0 {
+		chunks = 1
+	}
+
+	totalFiles = 1
+	totalChunks = chunks
+
+	return totalFiles, totalChunks, nil
 }

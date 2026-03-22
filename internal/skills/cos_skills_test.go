@@ -179,20 +179,3 @@ func TestCOSGetPresignedURLSkill_InputValidation(t *testing.T) {
 		})
 	}
 }
-
-func TestCOSGetQuotaSkill(t *testing.T) {
-	storage := cos.NewDefaultStorage()
-	skill := NewCOSGetQuotaSkill(storage)
-
-	result, err := skill.Invoke(context.Background(), nil, nil)
-	if err != nil {
-		t.Fatalf("Invoke() error = %v", err)
-	}
-
-	requiredFields := []string{"used_bytes", "limit_bytes", "used_gb", "limit_gb", "percentage"}
-	for _, field := range requiredFields {
-		if _, ok := result[field]; !ok {
-			t.Errorf("field %s not found in result", field)
-		}
-	}
-}

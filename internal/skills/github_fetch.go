@@ -490,3 +490,96 @@ func splitRepoFullName(repoFullName string) (owner string, repo string, err erro
 	}
 	return parts[0], parts[1], nil
 }
+
+type GitHubSearchResult struct {
+	TotalCount        int                `json:"total_count"`
+	IncompleteResults bool               `json:"incomplete_results"`
+	Items             []GitHubSearchItem `json:"items"`
+}
+
+type GitHubRepo struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	FullName    string `json:"full_name"`
+	Description string `json:"description"`
+	HTMLURL     string `json:"html_url"`
+	Stars       int    `json:"stargazers_count"`
+	Language    string `json:"language"`
+}
+
+type GitHubSearchItem struct {
+	Name        string                   `json:"name"`
+	Path        string                   `json:"path"`
+	SHA         string                   `json:"sha"`
+	URL         string                   `json:"url"`
+	Repository  GitHubRepo               `json:"repository"`
+	Score       float64                  `json:"score"`
+	TextMatches []map[string]interface{} `json:"text_matches,omitempty"`
+}
+
+func (f *GitHubFetcher) SearchCode(ctx context.Context, query string, perPage int) (*GitHubSearchResult, error) {
+	if perPage <= 0 || perPage > 100 {
+		perPage = 30
+	}
+
+	searchURL := fmt.Sprintf("%s/search/code?q=%s&per_page=%d", f.baseURL(), url.QueryEscape(query), perPage)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request failed: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/vnd.github.text-match+json")
+	f.addAuth(req)
+
+	resp, err := f.httpClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("search request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("search failed: status=%s body=%q", resp.Status, string(b))
+	}
+
+	var result GitHubSearchResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response failed: %w", err)
+	}
+
+	return &result, nil
+}
+
+func (f *GitHubFetcher) SearchRepos(ctx context.Context, query string, perPage int) (*GitHubSearchResult, error) {
+	if perPage <= 0 || perPage > 100 {
+		perPage = 30
+	}
+
+	searchURL := fmt.Sprintf("%s/search/repositories?q=%s&per_page=%d", f.baseURL(), url.QueryEscape(query), perPage)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request failed: %w", err)
+	}
+
+	f.addAuth(req)
+
+	resp, err := f.httpClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("search request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("search failed: status=%s body=%q", resp.Status, string(b))
+	}
+
+	var result GitHubSearchResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response failed: %w", err)
+	}
+
+	return &result, nil
+}
