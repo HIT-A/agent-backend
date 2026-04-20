@@ -12,7 +12,6 @@ import (
 
 	"github.com/joho/godotenv"
 
-	"hoa-agent-backend/internal/cos"
 	"hoa-agent-backend/internal/httpserver"
 	"hoa-agent-backend/internal/mcp"
 	"hoa-agent-backend/internal/skills"
@@ -37,11 +36,6 @@ func main() {
 	defer stop()
 
 	syncknowledge.StartAutoSync(ctx, 0)
-
-	cosClient, err := cos.NewClientFromEnv()
-	if err != nil {
-		log.Printf("WARNING: COS initialization failed: %v", err)
-	}
 
 	mcpRegistry := skills.GetMCPRegistry()
 
@@ -72,11 +66,6 @@ func main() {
 		LineDelimited: true,
 	})
 
-	var cosStorage *cos.Storage
-	if cosClient != nil {
-		cosStorage = cos.NewStorage(cosClient, 10*1024*1024)
-	}
-
 	tempDir := os.Getenv("TEMP_DIR")
 	if tempDir == "" {
 		tempDir = "./data/temp"
@@ -87,7 +76,6 @@ func main() {
 	}
 
 	opts := httpserver.Options{
-		COSStorage:  cosStorage,
 		MCPRegistry: mcpRegistry,
 		TempStore:   tempStore,
 	}

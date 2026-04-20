@@ -2,8 +2,6 @@ package skills
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -95,52 +93,13 @@ func NewCrawl4AIPageSkill(mcpRegistry *mcp.Registry) Skill {
 				return result, nil
 			}
 
-			contentHash := sha256.Sum256(body)
-			sha256Hex := hex.EncodeToString(contentHash[:])
-
-			// Dedup check
-			dedupStore, _ := NewDedupStoreFromEnv()
-			if dedupStore != nil {
-				shouldIngest, existing, _ := dedupStore.ShouldIngest(ctx, sha256Hex)
-				result["dedup"] = map[string]any{
-					"sha256": sha256Hex[:12],
-				}
-				if !shouldIngest {
-					result["dedup"].(map[string]any)["skipped"] = true
-					result["dedup"].(map[string]any)["existing_cos"] = existing.COSKey
-					dedupStore.Close()
-					return result, nil
-				}
-				_ = dedupStore.Close()
-			}
-
-			// Store in COS
-			cosStorage := GetCOSStorage()
-			var cosKey string
-			if in.StoreInCOS && cosStorage != nil {
-				key := fmt.Sprintf("%s/crawl/%s", in.COSPrefix, sha256Hex[:12]+"_"+fileName)
-				if _, err := cosStorage.SaveFile(ctx, key, body, "text/markdown"); err == nil {
-					cosKey = key
-					result["cos"] = map[string]any{"key": cosKey}
-				}
-			}
-
-			// Record to dedup store
-			if dedupStore != nil && cosKey != "" {
-				dedupStore2, _ := NewDedupStoreFromEnv()
-				if dedupStore2 != nil {
-					_ = dedupStore2.Record(ctx, sha256Hex, cosKey, int64(len(body)))
-					dedupStore2.Close()
-				}
-			}
-
 			// Direct RAG ingest
 			if in.AutoIngestRAG && len(body) > 0 {
 				qdrant, err := NewQdrantClientFromEnv()
 				if err == nil {
 					embedder, err := NewEmbeddingProviderFromEnv()
 					if err == nil {
-						ingested, iErr := IngestMarkdownDirect(ctx, body, fileName, "crawl4ai/"+fileName, cosStorage, GetMCPRegistry(), qdrant, embedder)
+						ingested, iErr := IngestMarkdownDirect(ctx, body, fileName, "crawl4ai/"+fileName, qdrant, embedder)
 						if iErr == nil {
 							result["rag"] = map[string]any{"chunks": ingested}
 						}
@@ -154,7 +113,7 @@ func NewCrawl4AIPageSkill(mcpRegistry *mcp.Registry) Skill {
 }
 
 // NewCrawl4AISiteSkill creates a skill for full site crawling (async)
-func NewCrawl4AISiteSkill(mcpRegistry *mcp.Registry, cosStorage interface{}) Skill {
+func NewCrawl4AISiteSkill(mcpRegistry *mcp.Registry) Skill {
 	return Skill{
 		Name:    "crawl4ai.site",
 		IsAsync: true,

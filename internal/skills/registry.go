@@ -2,7 +2,6 @@ package skills
 
 import (
 	"context"
-	"hoa-agent-backend/internal/cos"
 	"hoa-agent-backend/internal/mcp"
 	"log"
 	"time"
@@ -11,19 +10,14 @@ import (
 // Global MCP registry
 var mcpRegistry *mcp.Registry
 
-// Global COS storage
-var cosStorage *cos.Storage
-
 // InitGlobals initializes global variables after .env is loaded
 func InitGlobals() {
 	mcpRegistry = mcp.NewRegistry()
-	cosStorage = cos.NewDefaultStorage()
 }
 
 // registerDefaultMCPServers registers default MCP servers
 func registerDefaultMCPServers() {
 	// Sequential Thinking MCP Server
-	// See: https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking
 	sequentialThinkingConfig := &mcp.ServerConfig{
 		Name:      "sequential-thinking",
 		Enabled:   true,
@@ -33,9 +27,6 @@ func registerDefaultMCPServers() {
 	registerMCPServerAsync(sequentialThinkingConfig)
 
 	// Anna's Archive MCP Server (文献搜索)
-	// See: https://github.com/iosifache/annas-mcp
-	// API key: 6qr5npo8S1ec3VZTmXhTwneHjaBAw
-	// Set API key via environment variable before starting the server
 	annasArchiveConfig := &mcp.ServerConfig{
 		Name:      "annas-archive",
 		Enabled:   true,
@@ -45,7 +36,6 @@ func registerDefaultMCPServers() {
 	registerMCPServerAsync(annasArchiveConfig)
 
 	// arXiv MCP Server (论文搜索)
-	// See: https://github.com/blazickjp/arxiv-mcp-server
 	arxivConfig := &mcp.ServerConfig{
 		Name:      "arxiv",
 		Enabled:   true,
@@ -55,8 +45,6 @@ func registerDefaultMCPServers() {
 	registerMCPServerAsync(arxivConfig)
 
 	// Brave Search MCP Server (网页搜索)
-	// See: https://github.com/brave/brave-search-mcp-server
-	// API Key: BSApGz16G0EmJB5CvCnGsjyTL4yZV5f
 	braveConfig := &mcp.ServerConfig{
 		Name:      "brave-search",
 		Enabled:   true,
@@ -66,7 +54,6 @@ func registerDefaultMCPServers() {
 	registerMCPServerAsync(braveConfig)
 
 	// Local Crawl4AI MCP Server (网页爬取)
-	// Uses the bundled server implementation under mcp-servers/crawl4ai.
 	crawl4AIConfig := &mcp.ServerConfig{
 		Name:      "crawl4ai",
 		Enabled:   true,
@@ -76,8 +63,6 @@ func registerDefaultMCPServers() {
 	registerMCPServerAsync(crawl4AIConfig)
 
 	// Unstructured MCP Server (文档格式转换)
-	// Converts PDF, DOCX, PPTX to Markdown
-	// Requires: pip install unstructured PyMuPDF python-docx python-pptx
 	unstructuredConfig := &mcp.ServerConfig{
 		Name:      "unstructured",
 		Enabled:   true,
@@ -105,13 +90,7 @@ func GetMCPRegistry() *mcp.Registry {
 	return mcpRegistry
 }
 
-// GetCOSStorage returns the global COS storage
-func GetCOSStorage() *cos.Storage {
-	return cosStorage
-}
-
 // Registry stores available skills.
-// Minimal implementation: in-memory list.
 type Registry struct {
 	skills []Skill
 	index  map[string]Skill
@@ -128,13 +107,8 @@ func NewRegistry() *Registry {
 		r.Register(skill)
 	}
 
-	r.Register(NewCOSListFilesSkill(cosStorage))
-	r.Register(NewCOSGetPresignedURLSkill(cosStorage))
-
 	// Register RAG ingestion skill
-	r.Register(NewRAGIngestSkill(cosStorage))
-
-	r.Register(NewFilesDownloadSkill(cosStorage))
+	r.Register(NewRAGIngestSkill())
 
 	// Register unified search skill
 	r.Register(NewUnifiedSearchSkill())
@@ -142,13 +116,9 @@ func NewRegistry() *Registry {
 	// Register aggregator summarize skill
 	r.Register(NewAggregatorSummarizeSkill())
 
-	// Register data ingest skills
-	r.Register(NewDataIngestSkill())
-	r.Register(NewBatchDataIngestSkill())
-
 	// Register Crawl4AI skills (requires MCP server registration first)
 	r.Register(NewCrawl4AIPageSkill(mcpRegistry))
-	r.Register(NewCrawl4AISiteSkill(mcpRegistry, cosStorage))
+	r.Register(NewCrawl4AISiteSkill(mcpRegistry))
 	r.Register(NewCrawl4AIStatusSkill(mcpRegistry))
 
 	// Register HIT teacher search skills
@@ -158,11 +128,6 @@ func NewRegistry() *Registry {
 	r.Register(NewCourseReadSkill())
 	r.Register(NewCoursesSearchSkill())
 
-	// Register GitHub batch download skills
-	r.Register(NewGitHubBatchDownloadSkill(mcpRegistry, cosStorage))
-	r.Register(NewDocumentConverterSkill(mcpRegistry))
-	r.Register(NewRAGIngestFromGitHubSkill(mcpRegistry, cosStorage))
-
 	return r
 }
 
@@ -170,16 +135,11 @@ func (r *Registry) Register(s Skill) {
 	if r.index == nil {
 		r.index = make(map[string]Skill)
 	}
-	// Keep deterministic list order: append in registration order.
 	r.skills = append(r.skills, s)
 	r.index[s.Name] = s
 }
 
 func (r *Registry) List() []Skill {
-	// Return a copy to keep registry immutable from callers.
-	//
-	// NOTE: We intentionally exclude Invoke from the returned slice so callers can
-	// safely compare and/or serialize the list.
 	out := make([]Skill, len(r.skills))
 	for i := range r.skills {
 		out[i] = Skill{Name: r.skills[i].Name, IsAsync: r.skills[i].IsAsync}

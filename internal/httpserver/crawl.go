@@ -58,7 +58,7 @@ func handleCrawlSite(opts Options) http.HandlerFunc {
 			return
 		}
 
-		skill := skills.NewCrawl4AISiteSkill(registry, nil)
+		skill := skills.NewCrawl4AISiteSkill(registry)
 		output, err := skill.Invoke(r.Context(), input, nil)
 		if err != nil {
 			writeInvokeError(w, err)

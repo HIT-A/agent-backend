@@ -46,7 +46,7 @@ func handleRAGIngest(opts Options) http.HandlerFunc {
 			return
 		}
 
-		skill := skills.NewRAGIngestSkill(opts.COSStorage)
+		skill := skills.NewRAGIngestSkill()
 		output, err := skill.Invoke(r.Context(), input, nil)
 		if err != nil {
 			writeInvokeError(w, err)

@@ -176,8 +176,6 @@ func executeUnifiedSearch(ctx context.Context, in UnifiedSearchInput) ([]SearchR
 				res, err = unifiedSearchArxiv(ctx, in.Query, in.TopK)
 			case "github":
 				res, err = unifiedSearchGitHub(ctx, in.Query, in.TopK)
-			case "cos":
-				res, err = unifiedSearchCOS(ctx, in.Query, in.TopK)
 			case "course":
 				res, err = unifiedSearchCourse(ctx, in.Query, in.TopK)
 			case "course_read":
@@ -778,32 +776,6 @@ func unifiedSearchGitHub(ctx context.Context, query string, topK int) ([]SearchR
 			URL:        fmt.Sprintf("https://github.com/%s/blob/main/%s", item.Repository.FullName, item.Path),
 			Score:      item.Score / float64(searchResults.TotalCount+1),
 		})
-	}
-
-	return results, nil
-}
-
-func unifiedSearchCOS(ctx context.Context, query string, topK int) ([]SearchResult, error) {
-	storage := GetCOSStorage()
-	if storage == nil {
-		return nil, fmt.Errorf("COS not configured")
-	}
-
-	files, err := storage.ListFiles(ctx, query, topK)
-	if err != nil {
-		return nil, fmt.Errorf("COS list: %w", err)
-	}
-
-	results := make([]SearchResult, len(files))
-	for i, f := range files {
-		key, _ := f["key"].(string)
-		results[i] = SearchResult{
-			Source:     "cos",
-			SourceType: "file",
-			Title:      key,
-			Content:    fmt.Sprintf("Size: %v bytes", f["size"]),
-			Score:      0.5,
-		}
 	}
 
 	return results, nil

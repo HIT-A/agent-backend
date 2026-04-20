@@ -5,12 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-
-	"hoa-agent-backend/internal/cos"
-	"hoa-agent-backend/internal/mcp"
 )
 
-func IngestMarkdownDirect(ctx context.Context, markdownContent []byte, sourceName, sourceTag string, cosStorage *cos.Storage, mcpRegistry *mcp.Registry, qdrant *QdrantClient, embedder EmbeddingProvider) (int, error) {
+func IngestMarkdownDirect(ctx context.Context, markdownContent []byte, sourceName, sourceTag string, qdrant *QdrantClient, embedder EmbeddingProvider) (int, error) {
 	if len(markdownContent) == 0 {
 		return 0, fmt.Errorf("empty content")
 	}
@@ -24,7 +21,7 @@ func IngestMarkdownDirect(ctx context.Context, markdownContent []byte, sourceNam
 	}
 
 	normalized := buildNormalizedMarkdown(doc)
-	_ = normalized // stored in Qdrant payload for debugging
+	_ = normalized
 	chunks := ChunkText(doc, 1400)
 	if len(chunks) == 0 {
 		return 0, fmt.Errorf("no chunks generated")

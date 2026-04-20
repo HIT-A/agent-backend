@@ -10,8 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"hoa-agent-backend/internal/cos"
 )
 
 type RAGIngestInput struct {
@@ -23,9 +21,7 @@ type RAGIngestInput struct {
 	DryRun     bool   `json:"dry_run"`
 	MaxFiles   int    `json:"max_files"`
 	MaxChunks  int    `json:"max_chunks"`
-	Workers    int    `json:"workers"`      // Number of concurrent workers
-	StoreInCOS bool   `json:"store_in_cos"` // Whether to store original files in COS
-	COSPrefix  string `json:"cos_prefix"`   // COS prefix for storing files
+	Workers    int    `json:"workers"` // Number of concurrent workers
 }
 
 // FileTask represents a file to be processed
@@ -44,7 +40,7 @@ type FileResult struct {
 	Skipped     bool
 }
 
-func NewRAGIngestSkill(cosStorage *cos.Storage) Skill {
+func NewRAGIngestSkill() Skill {
 	return Skill{
 		Name:    "rag.ingest",
 		IsAsync: true,
@@ -78,9 +74,6 @@ func NewRAGIngestSkill(cosStorage *cos.Storage) Skill {
 			}
 			if in.Workers <= 0 {
 				in.Workers = 4 // Default to 4 concurrent workers
-			}
-			if in.COSPrefix == "" {
-				in.COSPrefix = "rag-source"
 			}
 
 			fetcher, err := NewGitHubFetcherFromEnv()
@@ -130,7 +123,7 @@ func NewRAGIngestSkill(cosStorage *cos.Storage) Skill {
 				go func(workerID int) {
 					defer wg.Done()
 					for task := range fileChan {
-						result := processFile(ctx, task, in, fetcher, qdrant, embedder, cosStorage, &processedChunks)
+						result := processFile(ctx, task, in, fetcher, qdrant, embedder, &processedChunks)
 						resultChan <- result
 
 						// Update counters atomically
@@ -181,7 +174,7 @@ func NewRAGIngestSkill(cosStorage *cos.Storage) Skill {
 
 func processFile(ctx context.Context, task FileTask, in RAGIngestInput,
 	fetcher *GitHubFetcher, qdrant *QdrantClient, embedder EmbeddingProvider,
-	cosStorage *cos.Storage, processedChunks *int64) FileResult {
+	processedChunks *int64) FileResult {
 
 	result := FileResult{File: task.File}
 
@@ -190,16 +183,6 @@ func processFile(ctx context.Context, task FileTask, in RAGIngestInput,
 	if err != nil {
 		result.Error = fmt.Errorf("fetch file: %w", err)
 		return result
-	}
-
-	// Store in COS if enabled (before processing)
-	if in.StoreInCOS && cosStorage != nil {
-		cosKey := fmt.Sprintf("%s/%s/%s/%s", in.COSPrefix, in.Repo, in.Ref, task.File.Path)
-		_, err := cosStorage.SaveFile(ctx, cosKey, fc.Content, "application/octet-stream")
-		if err != nil {
-			// Log error but continue processing
-			fmt.Printf("Warning: failed to store file %s in COS: %v\n", task.File.Path, err)
-		}
 	}
 
 	// Parse document
@@ -344,8 +327,6 @@ func decodeRAGIngestInput(m map[string]any) (RAGIngestInput, error) {
 	in.MaxFiles = getInt("max_files")
 	in.MaxChunks = getInt("max_chunks")
 	in.Workers = getInt("workers")
-	in.StoreInCOS = getBool("store_in_cos")
-	in.COSPrefix = getStr("cos_prefix")
 
 	if in.Repo == "" {
 		return in, fmt.Errorf("repo is required")

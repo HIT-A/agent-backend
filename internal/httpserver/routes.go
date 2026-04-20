@@ -3,13 +3,11 @@ package httpserver
 import (
 	"net/http"
 
-	"hoa-agent-backend/internal/cos"
 	"hoa-agent-backend/internal/mcp"
 	"hoa-agent-backend/internal/tempstore"
 )
 
 type Options struct {
-	COSStorage  *cos.Storage
 	MCPRegistry *mcp.Registry
 	TempStore   *tempstore.Store
 }
@@ -38,8 +36,6 @@ func RegisterRoutes(mux *http.ServeMux, opts Options) {
 
 	mux.HandleFunc("/api/courses/search", handleCoursesSearch(opts))
 	mux.HandleFunc("/api/courses/read", handleCourseRead(opts))
-	mux.HandleFunc("/api/files/download", handleFilesDownload(opts))
-	mux.HandleFunc("/api/files/list", handleFilesList(opts))
 	mux.HandleFunc("/api/rag/query", handleRAGQuery(opts))
 	mux.HandleFunc("/api/rag/ingest", handleRAGIngest(opts))
 	mux.HandleFunc("/api/crawl/page", handleCrawlPage(opts))

@@ -255,29 +255,13 @@ func maybeQueueTransitOutput(ctx context.Context, serverName, toolName string, a
 		}
 	}
 
-	// Store in COS
-	cosStorage := GetCOSStorage()
-	var cosKey string
-	if cosStorage != nil {
-		key := fmt.Sprintf("annas/%s/%s", sha256Hex[:12], filename)
-		if _, err := cosStorage.SaveFile(ctx, key, b, "application/octet-stream"); err == nil {
-			cosKey = key
-		}
-	}
-
-	// Record to dedup store
-	if dedupStore != nil && cosKey != "" {
-		dedupStore.Record(ctx, sha256Hex, cosKey, int64(len(b)))
-		dedupStore.Close()
-	}
-
 	// Direct RAG ingest
 	qdrant, err := NewQdrantClientFromEnv()
 	var ragChunks int
 	if err == nil {
 		embedder, err := NewEmbeddingProviderFromEnv()
 		if err == nil {
-			ingested, iErr := IngestMarkdownDirect(ctx, b, filename, "annas/"+filename, cosStorage, GetMCPRegistry(), qdrant, embedder)
+			ingested, iErr := IngestMarkdownDirect(ctx, b, filename, "annas/"+filename, qdrant, embedder)
 			if iErr == nil {
 				ragChunks = ingested
 			}
@@ -290,7 +274,6 @@ func maybeQueueTransitOutput(ctx context.Context, serverName, toolName string, a
 		"source":     sourceInfo,
 		"size":       len(b),
 		"sha256":     sha256Hex[:12],
-		"cos_key":    cosKey,
 		"rag_chunks": ragChunks,
 	}
 }
