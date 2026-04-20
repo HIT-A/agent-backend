@@ -6,23 +6,21 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
 
-type DailyStats struct {
-	Date         string           `json:"date"`
-	TotalCalls   int64            `json:"total_calls"`
-	EndpointHits map[string]int64 `json:"endpoint_hits"`
-	UniqueIPs    map[string]bool  `json:"-"`
-	IPCount      int64            `json:"unique_ips"`
+type AppUsage struct {
+	Date          string `json:"date"`
+	TotalVisits   int64  `json:"total_visits"`
+	UniqueDevices int64  `json:"unique_devices"`
 }
 
 type StatsStore struct {
-	mu      sync.RWMutex
-	current *DailyStats
-	dataDir string
+	mu        sync.RWMutex
+	current   *AppUsage
+	dataDir   string
+	deviceIDs map[string]bool
 }
 
 func NewStatsStore(dataDir string) *StatsStore {
@@ -32,59 +30,56 @@ func NewStatsStore(dataDir string) *StatsStore {
 	_ = os.MkdirAll(dataDir, 0755)
 
 	s := &StatsStore{
-		dataDir: dataDir,
-		current: loadTodayStats(dataDir),
+		dataDir:   dataDir,
+		deviceIDs: make(map[string]bool),
+		current:   loadTodayUsage(dataDir),
 	}
 	return s
 }
 
-func (s *StatsStore) Record(endpoint string, clientIP string) {
+func (s *StatsStore) RecordVisit(deviceID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	today := time.Now().Format("2006-01-02")
 	if s.current.Date != today {
 		s.saveLocked()
-		s.current = &DailyStats{
-			Date:         today,
-			EndpointHits: make(map[string]int64),
-			UniqueIPs:    make(map[string]bool),
+		s.current = &AppUsage{
+			Date: today,
 		}
+		s.deviceIDs = make(map[string]bool)
 	}
 
-	s.current.TotalCalls++
-	s.current.EndpointHits[endpoint]++
-
-	if clientIP != "" && !s.current.UniqueIPs[clientIP] {
-		s.current.UniqueIPs[clientIP] = true
-		s.current.IPCount = int64(len(s.current.UniqueIPs))
-	}
-}
-
-func (s *StatsStore) Today() DailyStats {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	return DailyStats{
-		Date:         s.current.Date,
-		TotalCalls:   s.current.TotalCalls,
-		EndpointHits: copyMap(s.current.EndpointHits),
-		IPCount:      s.current.IPCount,
+	s.current.TotalVisits++
+	if deviceID != "" && !s.deviceIDs[deviceID] {
+		s.deviceIDs[deviceID] = true
+		s.current.UniqueDevices = int64(len(s.deviceIDs))
 	}
 }
 
-func (s *StatsStore) History(days int) []DailyStats {
+func (s *StatsStore) Today() AppUsage {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	result := make([]DailyStats, 0, days)
+	return AppUsage{
+		Date:          s.current.Date,
+		TotalVisits:   s.current.TotalVisits,
+		UniqueDevices: s.current.UniqueDevices,
+	}
+}
+
+func (s *StatsStore) History(days int) []AppUsage {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]AppUsage, 0, days)
 	result = append(result, s.Today())
 
 	for i := 1; i < days; i++ {
 		date := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
-		stat := loadStatsForDate(s.dataDir, date)
-		if stat != nil {
-			result = append(result, *stat)
+		usage := loadUsageForDate(s.dataDir, date)
+		if usage != nil {
+			result = append(result, *usage)
 		}
 	}
 	return result
@@ -97,7 +92,7 @@ func (s *StatsStore) Save() {
 }
 
 func (s *StatsStore) saveLocked() {
-	if s.current == nil || s.current.TotalCalls == 0 {
+	if s.current == nil || s.current.TotalVisits == 0 {
 		return
 	}
 	path := filepath.Join(s.dataDir, s.current.Date+".json")
@@ -105,67 +100,53 @@ func (s *StatsStore) saveLocked() {
 	_ = os.WriteFile(path, b, 0644)
 }
 
-func loadTodayStats(dataDir string) *DailyStats {
+func loadTodayUsage(dataDir string) *AppUsage {
 	today := time.Now().Format("2006-01-02")
-	stat := loadStatsForDate(dataDir, today)
-	if stat != nil {
-		stat.UniqueIPs = make(map[string]bool)
-		return stat
+	usage := loadUsageForDate(dataDir, today)
+	if usage != nil {
+		return usage
 	}
-	return &DailyStats{
-		Date:         today,
-		EndpointHits: make(map[string]int64),
-		UniqueIPs:    make(map[string]bool),
+	return &AppUsage{
+		Date: today,
 	}
 }
 
-func loadStatsForDate(dataDir, date string) *DailyStats {
+func loadUsageForDate(dataDir, date string) *AppUsage {
 	path := filepath.Join(dataDir, date+".json")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
-	var stat DailyStats
-	if err := json.Unmarshal(b, &stat); err != nil {
+	var usage AppUsage
+	if err := json.Unmarshal(b, &usage); err != nil {
 		return nil
 	}
-	return &stat
+	return &usage
 }
 
-func copyMap(m map[string]int64) map[string]int64 {
-	out := make(map[string]int64, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
-}
-
-func TrackingMiddleware(next http.Handler, store *StatsStore) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if store != nil && strings.HasPrefix(r.URL.Path, "/api/") {
-			ip := extractIP(r)
-			store.Record(r.URL.Path, ip)
+func HandleVisit(store *StatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
 		}
-		next.ServeHTTP(w, r)
-	})
-}
 
-func extractIP(r *http.Request) string {
-	fwd := r.Header.Get("X-Forwarded-For")
-	if fwd != "" {
-		parts := strings.Split(fwd, ",")
-		if len(parts) > 0 {
-			return strings.TrimSpace(parts[0])
+		var req struct {
+			DeviceID string `json:"device_id"`
 		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+
+		store.RecordVisit(req.DeviceID)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+		})
 	}
-	if ip := r.Header.Get("X-Real-Ip"); ip != "" {
-		return ip
-	}
-	ip := r.RemoteAddr
-	if idx := strings.LastIndex(ip, ":"); idx != -1 {
-		ip = ip[:idx]
-	}
-	return ip
 }
 
 func HandleStats(store *StatsStore) http.HandlerFunc {
@@ -195,4 +176,13 @@ func HandleStats(store *StatsStore) http.HandlerFunc {
 			"data": history,
 		})
 	}
+}
+
+func writeJSONError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]any{
+		"ok":    false,
+		"error": msg,
+	})
 }

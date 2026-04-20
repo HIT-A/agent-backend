@@ -17,7 +17,7 @@ type Options struct {
 func NewRouter(opts Options) http.Handler {
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, opts)
-	return stats.TrackingMiddleware(mux, opts.StatsStore)
+	return mux
 }
 
 func RegisterRoutes(mux *http.ServeMux, opts Options) {
@@ -56,4 +56,5 @@ func RegisterRoutes(mux *http.ServeMux, opts Options) {
 	mux.HandleFunc("/api/temp/parse", handleTempParse(opts))
 	mux.HandleFunc("/api/temp/list", handleTempList(opts))
 	mux.HandleFunc("/api/stats", stats.HandleStats(opts.StatsStore))
+	mux.HandleFunc("/api/visit", stats.HandleVisit(opts.StatsStore))
 }
