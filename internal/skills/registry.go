@@ -128,17 +128,12 @@ func NewRegistry() *Registry {
 		r.Register(skill)
 	}
 
-	// Register COS storage skills
-	r.Register(NewCOSSaveFileSkill(cosStorage))
-	r.Register(NewCOSDeleteFileSkill(cosStorage))
 	r.Register(NewCOSListFilesSkill(cosStorage))
 	r.Register(NewCOSGetPresignedURLSkill(cosStorage))
 
 	// Register RAG ingestion skill
 	r.Register(NewRAGIngestSkill(cosStorage))
 
-	// Register file upload/download skills
-	r.Register(NewFilesUploadSkill(cosStorage))
 	r.Register(NewFilesDownloadSkill(cosStorage))
 
 	// Register unified search skill

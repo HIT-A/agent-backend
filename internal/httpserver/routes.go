@@ -38,10 +38,8 @@ func RegisterRoutes(mux *http.ServeMux, opts Options) {
 
 	mux.HandleFunc("/api/courses/search", handleCoursesSearch(opts))
 	mux.HandleFunc("/api/courses/read", handleCourseRead(opts))
-	mux.HandleFunc("/api/files/upload", handleFilesUpload(opts))
 	mux.HandleFunc("/api/files/download", handleFilesDownload(opts))
 	mux.HandleFunc("/api/files/list", handleFilesList(opts))
-	mux.HandleFunc("/api/files/delete", handleFilesDelete(opts))
 	mux.HandleFunc("/api/rag/query", handleRAGQuery(opts))
 	mux.HandleFunc("/api/rag/ingest", handleRAGIngest(opts))
 	mux.HandleFunc("/api/crawl/page", handleCrawlPage(opts))
