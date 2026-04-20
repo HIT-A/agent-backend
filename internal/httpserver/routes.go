@@ -4,18 +4,20 @@ import (
 	"net/http"
 
 	"hoa-agent-backend/internal/mcp"
+	"hoa-agent-backend/internal/stats"
 	"hoa-agent-backend/internal/tempstore"
 )
 
 type Options struct {
 	MCPRegistry *mcp.Registry
 	TempStore   *tempstore.Store
+	StatsStore  *stats.StatsStore
 }
 
 func NewRouter(opts Options) http.Handler {
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, opts)
-	return mux
+	return stats.TrackingMiddleware(mux, opts.StatsStore)
 }
 
 func RegisterRoutes(mux *http.ServeMux, opts Options) {
@@ -53,4 +55,5 @@ func RegisterRoutes(mux *http.ServeMux, opts Options) {
 	mux.HandleFunc("/api/temp/download", handleTempDownload(opts))
 	mux.HandleFunc("/api/temp/parse", handleTempParse(opts))
 	mux.HandleFunc("/api/temp/list", handleTempList(opts))
+	mux.HandleFunc("/api/stats", stats.HandleStats(opts.StatsStore))
 }

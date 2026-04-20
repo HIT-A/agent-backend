@@ -15,6 +15,7 @@ import (
 	"hoa-agent-backend/internal/httpserver"
 	"hoa-agent-backend/internal/mcp"
 	"hoa-agent-backend/internal/skills"
+	"hoa-agent-backend/internal/stats"
 	syncknowledge "hoa-agent-backend/internal/sync"
 	"hoa-agent-backend/internal/tempstore"
 )
@@ -66,6 +67,8 @@ func main() {
 		LineDelimited: true,
 	})
 
+	statsStore := stats.NewStatsStore("")
+
 	tempDir := os.Getenv("TEMP_DIR")
 	if tempDir == "" {
 		tempDir = "./data/temp"
@@ -78,6 +81,7 @@ func main() {
 	opts := httpserver.Options{
 		MCPRegistry: mcpRegistry,
 		TempStore:   tempStore,
+		StatsStore:  statsStore,
 	}
 
 	router := httpserver.NewRouter(opts)
