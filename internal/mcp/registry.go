@@ -47,7 +47,11 @@ func (r *Registry) Register(ctx context.Context, config *ServerConfig) (*Registe
 		if len(config.Command) == 0 {
 			return nil, fmt.Errorf("command is required for stdio transport")
 		}
-		transport = NewStdioTransport(config.Command)
+		if config.LineDelimited {
+			transport = NewLineDelimitedTransport(config.Command, config.Env)
+		} else {
+			transport = NewStdioTransport(config.Command, config.Env)
+		}
 	default:
 		return nil, fmt.Errorf("unsupported transport: %s", config.Transport)
 	}
@@ -66,6 +70,7 @@ func (r *Registry) Register(ctx context.Context, config *ServerConfig) (*Registe
 		Tools:        client.GetTools(),
 		Resources:    client.GetResources(),
 		Initialized:  true,
+		Client:       client,
 	}
 
 	r.mu.Lock()

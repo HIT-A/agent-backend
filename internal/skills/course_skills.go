@@ -6,15 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
 // CourseReadInput 读取课程输入
 type CourseReadInput struct {
-	Campus     string `json:"campus"` // shenzhen/weihai/harbin
-	CourseCode string `json:"course_code"`
-	Repo       string `json:"repo,omitempty"`
-	Org        string `json:"org,omitempty"`
+	Campus      string `json:"campus"` // shenzhen/weihai/harbin
+	CourseCode  string `json:"course_code"`
+	Repo        string `json:"repo,omitempty"`
+	Org         string `json:"org,omitempty"`
 	IncludeTOML bool   `json:"include_toml,omitempty"`
 }
 
@@ -200,4 +202,15 @@ func parseCourseSearchInput(input map[string]any) CourseSearchInput {
 	}
 
 	return in
+}
+
+func getPRServerBaseURL() string {
+	if url := os.Getenv("PR_SERVER_URL"); url != "" {
+		return strings.TrimRight(url, "/")
+	}
+	return "http://localhost:8080"
+}
+
+func getPRServerToken() string {
+	return os.Getenv("PR_SERVER_TOKEN")
 }

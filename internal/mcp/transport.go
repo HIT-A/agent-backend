@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -85,9 +86,11 @@ func (t *HTTPTransport) Close() error {
 
 // StdioTransport implements MCP over stdio
 type StdioTransport struct {
-	Command     []string
-	idGenerator *IDGenerator
-	initialized bool
+	Command       []string
+	Env           map[string]string
+	LineDelimited bool
+	idGenerator   *IDGenerator
+	initialized   bool
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
@@ -96,10 +99,20 @@ type StdioTransport struct {
 	reader *bufio.Reader
 }
 
-func NewStdioTransport(command []string) *StdioTransport {
+func NewStdioTransport(command []string, env map[string]string) *StdioTransport {
 	return &StdioTransport{
 		Command:     command,
+		Env:         env,
 		idGenerator: &IDGenerator{},
+	}
+}
+
+func NewLineDelimitedTransport(command []string, env map[string]string) *StdioTransport {
+	return &StdioTransport{
+		Command:       command,
+		Env:           env,
+		LineDelimited: true,
+		idGenerator:   &IDGenerator{},
 	}
 }
 
@@ -119,13 +132,29 @@ func (t *StdioTransport) Send(ctx context.Context, msg *Message) (*Message, erro
 		return nil, fmt.Errorf("marshal message: %w", err)
 	}
 
-	// Prefer line-delimited JSON-RPC for stdio (widely used by MCP servers);
-	// reader still accepts Content-Length framed responses for compatibility.
-	if _, err := t.stdin.Write(append(body, '\n')); err != nil {
-		return nil, fmt.Errorf("write body: %w", err)
+	if t.LineDelimited {
+		if _, err := t.stdin.Write(body); err != nil {
+			return nil, fmt.Errorf("write body: %w", err)
+		}
+		if _, err := t.stdin.Write([]byte("\n")); err != nil {
+			return nil, fmt.Errorf("write newline: %w", err)
+		}
+	} else {
+		header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(body))
+		if _, err := t.stdin.Write([]byte(header)); err != nil {
+			return nil, fmt.Errorf("write header: %w", err)
+		}
+		if _, err := t.stdin.Write(body); err != nil {
+			return nil, fmt.Errorf("write body: %w", err)
+		}
 	}
 
+	deadline := time.Now().Add(30 * time.Second)
 	for {
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timeout waiting for response to message %v", msg.ID)
+		}
+
 		respBody, err := readMCPMessage(t.reader)
 		if err != nil {
 			return nil, fmt.Errorf("read response: %w", err)
@@ -179,6 +208,12 @@ func (t *StdioTransport) ensureProcess() error {
 	}
 
 	cmd := exec.Command(t.Command[0], t.Command[1:]...)
+	if len(t.Env) > 0 {
+		cmd.Env = os.Environ()
+		for k, v := range t.Env {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("create stdin pipe: %w", err)
@@ -187,7 +222,7 @@ func (t *StdioTransport) ensureProcess() error {
 	if err != nil {
 		return fmt.Errorf("create stdout pipe: %w", err)
 	}
-	cmd.Stderr = io.Discard
+	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start stdio command: %w", err)
@@ -242,6 +277,7 @@ func readMCPMessage(r *bufio.Reader) ([]byte, error) {
 			return body, nil
 		}
 
+		// Some MCP servers (e.g. brave-search) send raw JSON without Content-Length header
 		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
 			return []byte(trimmed), nil
 		}

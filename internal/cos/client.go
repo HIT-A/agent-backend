@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/tencentyun/cos-go-sdk-v5"
@@ -35,6 +36,11 @@ func NewClient(secretID, secretKey, region, bucket string) (*Client, error) {
 	}
 	if bucket == "" {
 		bucket = "hita-courses"
+	}
+
+	appid := os.Getenv("COS_APPID")
+	if appid != "" && !strings.HasSuffix(bucket, "-"+appid) {
+		bucket = bucket + "-" + appid
 	}
 
 	u, err := url.Parse(fmt.Sprintf("https://%s.cos.%s.myqcloud.com", bucket, region))

@@ -103,20 +103,27 @@ func NewMCPCallToolSkill(registry *mcp.Registry) Skill {
 				return nil, &InvokeError{Code: "INVALID_INPUT", Message: fmt.Sprintf("tool '%s' not found in server '%s'", toolName, serverName), Retryable: false}
 			}
 
-			// Get MCP client (we need to store clients in registry for this to work)
-			// For now, we'll create a temporary client
-			var mcpTransport mcp.Transport
-			if server.Config.Transport == "http" {
-				mcpTransport = mcp.NewHTTPTransport(server.Config.URL)
-			} else if server.Config.Transport == "stdio" {
-				mcpTransport = mcp.NewStdioTransport(server.Config.Command)
-			}
+			var client *mcp.Client
+			if server.Client != nil && server.Initialized {
+				client = server.Client
+			} else {
+				var mcpTransport mcp.Transport
+				if server.Config.Transport == "http" {
+					mcpTransport = mcp.NewHTTPTransport(server.Config.URL)
+				} else if server.Config.Transport == "stdio" {
+					if server.Config.LineDelimited {
+						mcpTransport = mcp.NewLineDelimitedTransport(server.Config.Command, server.Config.Env)
+					} else {
+						mcpTransport = mcp.NewStdioTransport(server.Config.Command, server.Config.Env)
+					}
+				}
 
-			client := mcp.NewClient(mcpTransport)
-			if err := client.Initialize(ctx); err != nil {
-				return nil, &InvokeError{Code: "INTERNAL", Message: fmt.Sprintf("failed to initialize MCP client: %v", err), Retryable: true}
+				client = mcp.NewClient(mcpTransport)
+				if err := client.Initialize(ctx); err != nil {
+					return nil, &InvokeError{Code: "INTERNAL", Message: fmt.Sprintf("failed to initialize MCP client: %v", err), Retryable: true}
+				}
+				defer client.Close()
 			}
-			defer client.Close()
 
 			// Call the tool
 			result, err := client.CallTool(ctx, toolName, arguments)

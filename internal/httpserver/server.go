@@ -10,7 +10,11 @@ type Server struct {
 }
 
 func New(addr string, opts Options) *Server {
-	return &Server{addr: addr, handler: NewRouter(opts)}
+	router := NewRouter(opts)
+
+	handler := RecoveryMiddleware(LoggingMiddleware(router))
+
+	return &Server{addr: addr, handler: handler}
 }
 
 func (s *Server) ListenAndServe() error {

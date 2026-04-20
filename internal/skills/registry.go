@@ -14,12 +14,10 @@ var mcpRegistry *mcp.Registry
 // Global COS storage
 var cosStorage *cos.Storage
 
-func init() {
+// InitGlobals initializes global variables after .env is loaded
+func InitGlobals() {
 	mcpRegistry = mcp.NewRegistry()
 	cosStorage = cos.NewDefaultStorage()
-
-	// Register default MCP servers
-	registerDefaultMCPServers()
 }
 
 // registerDefaultMCPServers registers default MCP servers
@@ -124,9 +122,6 @@ func NewRegistry() *Registry {
 	r.Register(NewEchoSkill())
 	r.Register(NewSleepEchoSkill())
 	r.Register(NewRAGQuerySkill())
-	r.Register(NewPRPreviewSkill())
-	r.Register(NewPRSubmitSkill())
-	r.Register(NewPRLookupSkill())
 
 	// Register MCP management skills
 	for _, skill := range NewMCPSkillsFromEnv(mcpRegistry) {
@@ -163,7 +158,6 @@ func NewRegistry() *Registry {
 
 	// Register HIT teacher search skills
 	r.Register(NewTeacherSearchSkill(mcpRegistry))
-	r.Register(NewTeacherBatchSearchSkill(mcpRegistry))
 
 	// Register course skills (pr-server)
 	r.Register(NewCourseReadSkill())
@@ -173,9 +167,6 @@ func NewRegistry() *Registry {
 	r.Register(NewGitHubBatchDownloadSkill(mcpRegistry, cosStorage))
 	r.Register(NewDocumentConverterSkill(mcpRegistry))
 	r.Register(NewRAGIngestFromGitHubSkill(mcpRegistry, cosStorage))
-
-	// Register RAG sync to repo skill
-	r.Register(NewRAGSyncToRepoSkill(cosStorage, mcpRegistry))
 
 	return r
 }

@@ -151,11 +151,13 @@ type ResourceContent struct {
 
 // ServerConfig describes an MCP server configuration
 type ServerConfig struct {
-	Name      string   `json:"name"`
-	Transport string   `json:"transport"` // "stdio" or "http"
-	URL       string   `json:"url"`       // for HTTP transport
-	Command   []string `json:"command"`   // for stdio transport
-	Enabled   bool     `json:"enabled"`
+	Name          string            `json:"name"`
+	Transport     string            `json:"transport"`
+	URL           string            `json:"url"`
+	Command       []string          `json:"command"`
+	Env           map[string]string `json:"env"`
+	LineDelimited bool              `json:"line_delimited"`
+	Enabled       bool              `json:"enabled"`
 }
 
 // RegisteredServer describes a registered MCP server
@@ -165,6 +167,7 @@ type RegisteredServer struct {
 	Tools        []Tool             `json:"tools"`
 	Resources    []Resource         `json:"resources"`
 	Initialized  bool               `json:"initialized"`
+	Client       *Client            `json:"-"`
 }
 
 // UnmarshalJSON implements custom JSON unmarshaling for ServerConfig

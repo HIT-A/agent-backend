@@ -400,19 +400,35 @@ func parseCrawlSiteInput(input map[string]any) CrawlSiteInput {
 
 // callMCPTool calls a tool on an MCP server
 func callMCPTool(ctx context.Context, server *mcp.RegisteredServer, toolName string, args map[string]any) (map[string]any, error) {
-	// Create transport based on server config
+	if server.Client != nil && server.Initialized {
+		result, err := server.Client.CallTool(ctx, toolName, args)
+		if err != nil {
+			return nil, fmt.Errorf("tool call failed: %w", err)
+		}
+
+		resultMap := map[string]any{}
+		data, _ := json.Marshal(result)
+		if err := json.Unmarshal(data, &resultMap); err != nil {
+			return nil, fmt.Errorf("unmarshal result: %w", err)
+		}
+		return resultMap, nil
+	}
+
 	var transport mcp.Transport
 	if server.Config.Transport == "http" {
 		transport = mcp.NewHTTPTransport(server.Config.URL)
 	} else if server.Config.Transport == "stdio" {
-		transport = mcp.NewStdioTransport(server.Config.Command)
+		if server.Config.LineDelimited {
+			transport = mcp.NewLineDelimitedTransport(server.Config.Command, server.Config.Env)
+		} else {
+			transport = mcp.NewStdioTransport(server.Config.Command, server.Config.Env)
+		}
 	} else {
 		return nil, fmt.Errorf("unsupported transport: %s", server.Config.Transport)
 	}
 
 	client := mcp.NewClient(transport)
 
-	// Initialize with timeout
 	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 

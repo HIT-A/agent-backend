@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@brave/brave-search-mcp-server", "--transport", "stdio"],
+      "env": {
+        "BRAVE_API_KEY": "BSApGz16G0EmJB5CvCnGsjyTL4yZV5f"
+      }
+    },
+    "crawl4ai": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-p", "11235:11235", "unclecode/crawl4ai:latest"],
+      "env": {}
+    }
+  }
+}

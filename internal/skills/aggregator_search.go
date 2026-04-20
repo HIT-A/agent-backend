@@ -22,6 +22,12 @@ type SearchResult struct {
 	Timestamp  time.Time      `json:"timestamp,omitempty"`
 }
 
+type BraveAnswerResult struct {
+	Answer string         `json:"answer"`
+	Model  string         `json:"model,omitempty"`
+	Usage  map[string]any `json:"usage,omitempty"`
+}
+
 // UnifiedSearchInput represents unified search input (new search skill)
 type UnifiedSearchInput struct {
 	Query     string
@@ -277,42 +283,92 @@ func unifiedSearchBrave(ctx context.Context, query string, topK int) ([]SearchRe
 		return nil, fmt.Errorf("brave_web_search: %w", err)
 	}
 
+	return parseBraveToolResult(toolResult)
+}
+
+func parseBraveToolResult(toolResult map[string]any) ([]SearchResult, error) {
 	type braveItem struct {
 		Title       string `json:"title"`
 		URL         string `json:"url"`
 		Description string `json:"description"`
 	}
 
+	type bravePayload struct {
+		Results []braveItem `json:"results"`
+		Warning string      `json:"warning"`
+		Error   string      `json:"error"`
+	}
+
 	results := make([]SearchResult, 0)
 
-	// Try parsing from text content (MCP returns JSON in content field)
-	if content, ok := toolResult["content"].([]any); ok && len(content) > 0 {
-		if first, ok := content[0].(map[string]any); ok {
-			if text, ok := first["text"].(string); ok && strings.TrimSpace(text) != "" {
-				var payload struct {
-					Results []braveItem `json:"results"`
-				}
-				if err := json.Unmarshal([]byte(text), &payload); err == nil {
-					for _, item := range payload.Results {
-						if strings.TrimSpace(item.Title) == "" && strings.TrimSpace(item.URL) == "" {
-							continue
-						}
-						results = append(results, SearchResult{
-							Source:     "brave",
-							SourceType: "web",
-							Title:      item.Title,
-							Content:    item.Description,
-							URL:        item.URL,
-							Score:      0.7,
-						})
+	appendBraveItem := func(item braveItem) {
+		if strings.TrimSpace(item.Title) == "" && strings.TrimSpace(item.URL) == "" {
+			return
+		}
+		results = append(results, SearchResult{
+			Source:     "brave",
+			SourceType: "web",
+			Title:      item.Title,
+			Content:    item.Description,
+			URL:        item.URL,
+			Score:      0.7,
+		})
+	}
+
+	if isError, _ := toolResult["isError"].(bool); isError {
+		if content, ok := toolResult["content"].([]any); ok {
+			messages := make([]string, 0, len(content))
+			for _, entry := range content {
+				if m, ok := entry.(map[string]any); ok {
+					if text, ok := m["text"].(string); ok && strings.TrimSpace(text) != "" {
+						messages = append(messages, strings.TrimSpace(text))
 					}
-					return results, nil
 				}
 			}
+			if len(messages) == 1 && messages[0] == "No web results found" {
+				return results, nil
+			}
+			if len(messages) > 0 {
+				return nil, fmt.Errorf("brave-search MCP error: %s", strings.Join(messages, "; "))
+			}
+		}
+		return nil, fmt.Errorf("brave-search MCP returned an unspecified error")
+	}
+
+	if content, ok := toolResult["content"].([]any); ok && len(content) > 0 {
+		for _, entry := range content {
+			m, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			text, ok := m["text"].(string)
+			if !ok || strings.TrimSpace(text) == "" {
+				continue
+			}
+
+			var payload bravePayload
+			if err := json.Unmarshal([]byte(text), &payload); err == nil {
+				if len(payload.Results) > 0 || payload.Warning != "" || payload.Error != "" {
+					for _, item := range payload.Results {
+						appendBraveItem(item)
+					}
+					if payload.Error != "" {
+						return nil, fmt.Errorf("brave-search payload error: %s", payload.Error)
+					}
+					continue
+				}
+			}
+
+			var item braveItem
+			if err := json.Unmarshal([]byte(text), &item); err == nil {
+				appendBraveItem(item)
+			}
+		}
+		if len(results) > 0 {
+			return results, nil
 		}
 	}
 
-	// Fallback: try parsing from direct results field
 	if rawResults, ok := toolResult["results"].([]any); ok {
 		for _, d := range rawResults {
 			if m, ok := d.(map[string]any); ok {
@@ -326,22 +382,121 @@ func unifiedSearchBrave(ctx context.Context, query string, topK int) ([]SearchRe
 				if v, ok := m["description"].(string); ok {
 					item.Description = v
 				}
-				if strings.TrimSpace(item.Title) == "" && strings.TrimSpace(item.URL) == "" {
-					continue
-				}
-				results = append(results, SearchResult{
-					Source:     "brave",
-					SourceType: "web",
-					Title:      item.Title,
-					Content:    item.Description,
-					URL:        item.URL,
-					Score:      0.7,
-				})
+				appendBraveItem(item)
 			}
 		}
 	}
 
 	return results, nil
+}
+
+// BraveSearch performs a Brave web search and returns results (exported for use by other packages)
+func BraveSearch(ctx context.Context, query string, count int) ([]SearchResult, error) {
+	if count <= 0 {
+		count = 5
+	}
+	return unifiedSearchBrave(ctx, query, count)
+}
+
+func unifiedBraveAnswer(ctx context.Context, query string, model string, country string, language string, enableCitations bool, enableResearch bool) (*BraveAnswerResult, error) {
+	registry := GetMCPRegistry()
+	if registry == nil {
+		return nil, fmt.Errorf("mcp registry not initialized")
+	}
+
+	server, exists := registry.Get("brave-search")
+	if !exists {
+		return nil, fmt.Errorf("brave-search MCP server not found")
+	}
+	if !server.Initialized {
+		return nil, fmt.Errorf("brave-search MCP server not initialized")
+	}
+
+	toolResult, err := callMCPTool(ctx, server, "brave_answer", map[string]any{
+		"query":            query,
+		"model":            model,
+		"country":          country,
+		"language":         language,
+		"enable_citations": enableCitations,
+		"enable_research":  enableResearch,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("brave_answer: %w", err)
+	}
+
+	return parseBraveAnswerToolResult(toolResult)
+}
+
+func parseBraveAnswerToolResult(toolResult map[string]any) (*BraveAnswerResult, error) {
+	type braveAnswerPayload struct {
+		Answer string         `json:"answer"`
+		Model  string         `json:"model"`
+		Usage  map[string]any `json:"usage"`
+		Error  string         `json:"error"`
+	}
+
+	readTexts := func() []string {
+		texts := []string{}
+		if content, ok := toolResult["content"].([]any); ok {
+			for _, entry := range content {
+				if m, ok := entry.(map[string]any); ok {
+					if text, ok := m["text"].(string); ok && strings.TrimSpace(text) != "" {
+						texts = append(texts, strings.TrimSpace(text))
+					}
+				}
+			}
+		}
+		if raw, ok := toolResult["raw_result"].(string); ok && strings.TrimSpace(raw) != "" {
+			texts = append(texts, strings.TrimSpace(raw))
+		}
+		return texts
+	}
+
+	texts := readTexts()
+	if isError, _ := toolResult["isError"].(bool); isError {
+		if len(texts) > 0 {
+			return nil, fmt.Errorf("brave-answer MCP error: %s", strings.Join(texts, "; "))
+		}
+		return nil, fmt.Errorf("brave-answer MCP returned an unspecified error")
+	}
+
+	for _, text := range texts {
+		var payload braveAnswerPayload
+		if err := json.Unmarshal([]byte(text), &payload); err == nil {
+			if payload.Error != "" {
+				return nil, fmt.Errorf("brave-answer payload error: %s", payload.Error)
+			}
+			if strings.TrimSpace(payload.Answer) != "" {
+				return &BraveAnswerResult{
+					Answer: payload.Answer,
+					Model:  payload.Model,
+					Usage:  payload.Usage,
+				}, nil
+			}
+		}
+
+		if strings.TrimSpace(text) != "" {
+			return &BraveAnswerResult{Answer: text}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("brave-answer returned empty content")
+}
+
+func BraveAnswer(ctx context.Context, query string, model string, country string, language string, enableCitations bool, enableResearch bool) (*BraveAnswerResult, error) {
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	if strings.TrimSpace(model) == "" {
+		model = "brave"
+	}
+	if strings.TrimSpace(country) == "" {
+		country = "us"
+	}
+	if strings.TrimSpace(language) == "" {
+		language = "en"
+	}
+	return unifiedBraveAnswer(ctx, query, model, country, language, enableCitations, enableResearch)
 }
 
 func unifiedSearchAnnas(ctx context.Context, query string, topK int) ([]SearchResult, error) {
