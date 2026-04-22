@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 import json
 import os
-import re
-from html import unescape
-from typing import Any, Dict, List
-from urllib.parse import parse_qs, urlparse, unquote
+from typing import Any, Dict, Iterable, List
 
 import requests
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
-server = Server("brave-search-local")
+server = Server("bocha-search-local")
 
-API_URL = "https://api.search.brave.com/res/v1/web/search"
+API_URL = "https://api.bocha.cn/v1/web-search"
 ANSWER_API_URL = "https://api.search.brave.com/res/v1/chat/completions"
-DDG_HTML_URL = "https://html.duckduckgo.com/html/"
 
 
 def _api_key() -> str:
-    return os.environ.get("BRAVE_API_KEY", "") or os.environ.get(
-        "BRAVE_SEARCH_API_KEY", ""
+    return (
+        os.environ.get("BOCHA_API_KEY", "")
+        or os.environ.get("BRAVE_API_KEY", "")
+        or os.environ.get("BRAVE_SEARCH_API_KEY", "")
     )
 
 
@@ -28,26 +26,16 @@ def _answer_key() -> str:
 
 
 def _proxies() -> Dict[str, str]:
-    http_proxy = os.environ.get("HTTP_PROXY")
-    https_proxy = os.environ.get("HTTPS_PROXY")
     proxies: Dict[str, str] = {}
-    if http_proxy:
-        proxies["http"] = http_proxy
-    if https_proxy:
-        proxies["https"] = https_proxy
+    for env_name, proxy_key in (
+        ("HTTP_PROXY", "http"),
+        ("HTTPS_PROXY", "https"),
+        ("ALL_PROXY", "all"),
+    ):
+        value = os.environ.get(env_name)
+        if value:
+            proxies[proxy_key] = value
     return proxies
-
-
-def _parse_monthly_limit(limit_header: str) -> int:
-    # Brave rate-limit header is often like: "2, 0"
-    # where the second value represents longer-window quota.
-    try:
-        parts = [p.strip() for p in (limit_header or "").split(",")]
-        if len(parts) >= 2:
-            return int(parts[1])
-    except Exception:
-        return -1
-    return -1
 
 
 def _usage_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
@@ -59,61 +47,49 @@ def _usage_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
     return usage
 
 
-def _strip_tags(text: str) -> str:
-    return re.sub(r"<[^>]+>", "", text or "")
+def _pick_results(data: Any) -> List[Dict[str, str]]:
+    candidates: Iterable[Any] = []
+    if isinstance(data, dict):
+        for key in ("data", "results", "items", "web", "webPages", "list"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                web_pages = value.get("webPages")
+                if isinstance(web_pages, dict) and isinstance(web_pages.get("value"), list):
+                    candidates = web_pages.get("value", [])
+                    break
+                if isinstance(value.get("results"), list):
+                    candidates = value.get("results", [])
+                    break
+                if isinstance(value.get("items"), list):
+                    candidates = value.get("items", [])
+                    break
+                if isinstance(value.get("value"), list):
+                    candidates = value.get("value", [])
+                    break
+                if isinstance(value.get("list"), list):
+                    candidates = value.get("list", [])
+                    break
+            elif isinstance(value, list):
+                candidates = value
+                break
+    elif isinstance(data, list):
+        candidates = data
 
-
-def _ddg_fallback(query: str, count: int, timeout: int = 20) -> List[Dict[str, str]]:
-    resp = requests.get(
-        DDG_HTML_URL,
-        params={"q": query},
-        headers={"User-Agent": "Mozilla/5.0"},
-        proxies=_proxies() or None,
-        timeout=timeout,
-    )
-    if resp.status_code != 200:
-        return []
-
-    html = resp.text
     results: List[Dict[str, str]] = []
-    blocks = re.findall(
-        r'<div class="result__body">(.*?)</div>\s*</div>', html, flags=re.S
-    )
-    if not blocks:
-        blocks = re.findall(
-            r'<a rel="nofollow" class="result__a".*?</a>', html, flags=re.S
-        )
-
-    for block in blocks:
-        a = re.search(
-            r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
-            block,
-            flags=re.S,
-        )
-        if not a:
+    for item in candidates:
+        if not isinstance(item, dict):
             continue
-        url = unescape(a.group(1)).strip()
-        if url.startswith("//"):
-            url = "https:" + url
-        if "duckduckgo.com/l/?" in url:
-            qs = parse_qs(urlparse(url).query)
-            if qs.get("uddg"):
-                url = unquote(qs["uddg"][0])
-        title = unescape(_strip_tags(a.group(2))).strip()
-
-        sn = re.search(
-            r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>', block, flags=re.S
-        )
-        if not sn:
-            sn = re.search(
-                r'<div[^>]*class="result__snippet"[^>]*>(.*?)</div>', block, flags=re.S
-            )
-        desc = unescape(_strip_tags(sn.group(1))).strip() if sn else ""
-
-        if url and title:
+        title = str(item.get("title") or item.get("name") or item.get("headline") or "").strip()
+        url = str(item.get("url") or item.get("link") or item.get("href") or item.get("sourceUrl") or "").strip()
+        desc = str(
+            item.get("description")
+            or item.get("snippet")
+            or item.get("summary")
+            or item.get("content")
+            or ""
+        ).strip()
+        if title or url or desc:
             results.append({"title": title, "url": url, "description": desc})
-        if len(results) >= count:
-            break
     return results
 
 
@@ -122,7 +98,7 @@ async def list_tools() -> List[Tool]:
     return [
         Tool(
             name="brave_web_search",
-            description="Search the web with Brave Search API.",
+            description="Search the web with Bocha web-search API.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -141,6 +117,16 @@ async def list_tools() -> List[Tool]:
                         "type": "string",
                         "description": "Language code",
                         "default": "en",
+                    },
+                    "summary": {
+                        "type": "boolean",
+                        "description": "Whether to request a summary from Bocha",
+                        "default": True,
+                    },
+                    "freshness": {
+                        "type": "string",
+                        "description": "Freshness filter like noLimit, day, week, month",
+                        "default": "noLimit",
                     },
                 },
                 "required": ["query"],
@@ -192,29 +178,36 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         if not key:
             return [
                 TextContent(
-                    type="text", text=json.dumps({"error": "Missing BRAVE_API_KEY"})
+                    type="text", text=json.dumps({"error": "Missing BOCHA_API_KEY"})
                 )
             ]
 
         query = arguments.get("query", "")
         count = max(1, min(int(arguments.get("count", 5)), 20))
 
-        params = {
-            "q": query,
+        payload: Dict[str, Any] = {
+            "query": query,
+            "summary": bool(arguments.get("summary", True)),
+            "freshness": arguments.get("freshness", "noLimit"),
             "count": count,
-            "country": arguments.get("country", "US"),
-            "search_lang": arguments.get("search_lang", "en"),
         }
+        country = arguments.get("country")
+        if country:
+            payload["country"] = country
+        search_lang = arguments.get("search_lang")
+        if search_lang:
+            payload["search_lang"] = search_lang
 
         headers = {
             "Accept": "application/json",
-            "X-Subscription-Token": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
         }
 
         try:
-            resp = requests.get(
+            resp = requests.post(
                 API_URL,
-                params=params,
+                json=payload,
                 headers=headers,
                 proxies=_proxies() or None,
                 timeout=30,
@@ -225,7 +218,7 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                         type="text",
                         text=json.dumps(
                             {
-                                "error": "Brave API request failed",
+                                "error": "Bocha API request failed",
                                 "status_code": resp.status_code,
                                 "body": resp.text[:1200],
                             }
@@ -234,53 +227,8 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                 ]
 
             data = resp.json()
-            web = data.get("web", {}) if isinstance(data, dict) else {}
-            web_results = web.get("results", []) if isinstance(web, dict) else []
-
-            # Some keys return HTTP 200 but only include query metadata, without web results.
-            # This usually indicates key entitlement/quota issue instead of transport failure.
-            if not web_results:
-                limit_header = resp.headers.get("x-ratelimit-limit", "")
-                monthly_limit = _parse_monthly_limit(limit_header)
-                hint = "Brave API returned no web results"
-                if monthly_limit == 0:
-                    hint = "Brave API key appears to have no data quota/entitlement (x-ratelimit-limit second value is 0)"
-
-                fallback_results = _ddg_fallback(query, count)
-                if fallback_results:
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(
-                                {
-                                    "query": query,
-                                    "count": len(fallback_results),
-                                    "results": fallback_results,
-                                    "warning": hint,
-                                    "fallback": {
-                                        "provider": "duckduckgo-html",
-                                        "used": True,
-                                    },
-                                    "rate_limit": {
-                                        "limit": resp.headers.get(
-                                            "x-ratelimit-limit", ""
-                                        ),
-                                        "remaining": resp.headers.get(
-                                            "x-ratelimit-remaining", ""
-                                        ),
-                                        "reset": resp.headers.get(
-                                            "x-ratelimit-reset", ""
-                                        ),
-                                    },
-                                    "raw_top_keys": list(data.keys())
-                                    if isinstance(data, dict)
-                                    else [],
-                                },
-                                ensure_ascii=False,
-                            ),
-                        )
-                    ]
-
+            results = _pick_results(data)
+            if not results:
                 return [
                     TextContent(
                         type="text",
@@ -289,18 +237,7 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                                 "query": query,
                                 "count": 0,
                                 "results": [],
-                                "warning": hint,
-                                "fallback": {
-                                    "provider": "duckduckgo-html",
-                                    "used": False,
-                                },
-                                "rate_limit": {
-                                    "limit": resp.headers.get("x-ratelimit-limit", ""),
-                                    "remaining": resp.headers.get(
-                                        "x-ratelimit-remaining", ""
-                                    ),
-                                    "reset": resp.headers.get("x-ratelimit-reset", ""),
-                                },
+                                "warning": "Bocha API returned no recognizable search results",
                                 "raw_top_keys": list(data.keys())
                                 if isinstance(data, dict)
                                 else [],
@@ -310,16 +247,6 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                     )
                 ]
 
-            results = []
-            for item in web_results:
-                results.append(
-                    {
-                        "title": item.get("title", ""),
-                        "url": item.get("url", ""),
-                        "description": item.get("description", ""),
-                    }
-                )
-
             return [
                 TextContent(
                     type="text",
@@ -328,6 +255,9 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                             "query": query,
                             "count": len(results),
                             "results": results,
+                            "raw_top_keys": list(data.keys())
+                            if isinstance(data, dict)
+                            else [],
                         },
                         ensure_ascii=False,
                     ),

@@ -23,6 +23,12 @@ import (
 func main() {
 	execPath, _ := os.Executable()
 	execDir := filepath.Dir(execPath)
+	appDir := filepath.Dir(execDir)
+	if wd, err := os.Getwd(); err == nil {
+		if _, statErr := os.Stat(filepath.Join(wd, "mcp-servers")); statErr == nil {
+			appDir = wd
+		}
+	}
 
 	if err := godotenv.Load(".env"); err != nil {
 		log.Printf("DEBUG: Failed to load .env from current dir: %v", err)
@@ -40,10 +46,25 @@ func main() {
 
 	mcpRegistry := skills.GetMCPRegistry()
 
+	braveScript := os.Getenv("BRAVE_MCP_SCRIPT")
+	if braveScript == "" {
+		braveScript = filepath.Join(appDir, "mcp-servers", "brave", "server.py")
+	}
+
+	crawl4aiScript := os.Getenv("CRAWL4AI_MCP_SCRIPT")
+	if crawl4aiScript == "" {
+		crawl4aiScript = filepath.Join(appDir, "mcp-servers", "crawl4ai", "server.py")
+	}
+
+	unstructuredScript := os.Getenv("UNSTRUCTURED_MCP_SCRIPT")
+	if unstructuredScript == "" {
+		unstructuredScript = filepath.Join(appDir, "mcp-servers", "unstructured", "server.py")
+	}
+
 	go registerMCPAsync(ctx, mcpRegistry, &mcp.ServerConfig{
 		Name:      "brave-search",
 		Transport: "stdio",
-		Command:   []string{"python3", "/Users/jiaoziang/workspace/agent-backend/mcp-servers/brave/server.py"},
+		Command:   []string{"python3", braveScript},
 		Env: map[string]string{
 			"BRAVE_API_KEY":        os.Getenv("BRAVE_API_KEY"),
 			"BRAVE_ANSWER_API_KEY": os.Getenv("BRAVE_ANSWER_API_KEY"),
@@ -56,14 +77,14 @@ func main() {
 	go registerMCPAsync(ctx, mcpRegistry, &mcp.ServerConfig{
 		Name:          "crawl4ai",
 		Transport:     "stdio",
-		Command:       []string{"python3", "/Users/jiaoziang/workspace/agent-backend/mcp-servers/crawl4ai/server.py"},
+		Command:       []string{"python3", crawl4aiScript},
 		LineDelimited: true,
 	})
 
 	go registerMCPAsync(ctx, mcpRegistry, &mcp.ServerConfig{
 		Name:          "unstructured",
 		Transport:     "stdio",
-		Command:       []string{"python3", "/Users/jiaoziang/workspace/agent-backend/mcp-servers/unstructured/server.py"},
+		Command:       []string{"python3", unstructuredScript},
 		LineDelimited: true,
 	})
 
